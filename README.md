@@ -18,7 +18,7 @@ Sheet with can open the app.
 |------|------|
 | `app.js`, `style.css`, `index.html` | The web page (edit these) |
 | `apps-script/Code.gs` | Server code: serves the page, reads/writes the Sheet |
-| `apps-script/Index.html` | **Generated** by `node tools/build.mjs` — page + style + script in one file for Apps Script |
+| `apps-script/Index.html`, `Style.html`, `App.html` | **Generated** by `node tools/build.mjs` from `index.html`, `style.css`, `app.js` |
 | `test/sim.html` | Runs the app against `Code.gs` with a fake Sheet, for testing without Google |
 
 ## Setup (one time)
@@ -26,7 +26,8 @@ Sheet with can open the app.
 1. Create a new Google Sheet at <https://sheets.new>. Name it **Menu Cost**.
 2. In the Sheet: **Extensions → Apps Script**. Name the project **Menu Cost**.
 3. Replace everything in `Code.gs` with the contents of `apps-script/Code.gs`. Save.
-4. Click **+** next to Files → **HTML**, name it `Index` (no `.html`). Replace its contents with `apps-script/Index.html`. Save.
+4. Click **+** next to Files → **HTML** three times, naming them `Index`, `Style` and `App` (no `.html`).
+   Replace each one's contents with `apps-script/Index.html`, `apps-script/Style.html` and `apps-script/App.html`. Save.
 5. In the toolbar pick the function **setup** and click **Run**. Approve the permissions
    (Google shows "Google hasn't verified this app" → **Advanced** → **Go to Menu Cost (unsafe)** → **Allow** — it is your own script).
    The Sheet now has the 5 tabs.
@@ -46,7 +47,7 @@ If two people save the same shop at the same time, the app warns and lets you re
 
 ### Updating the app later
 
-Edit `app.js` / `style.css`, run `node tools/build.mjs`, paste the new `apps-script/Index.html` (and `Code.gs` if changed) into the Apps Script editor, then **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. The URL stays the same.
+Edit `app.js` / `style.css`, run `node tools/build.mjs`, paste the changed files from `apps-script/` into the Apps Script editor, then **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. The URL stays the same.
 
 ## Editing data in the Sheet
 

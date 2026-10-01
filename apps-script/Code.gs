@@ -17,9 +17,14 @@ const TEXT_COLUMNS = ['shop_id', 'id', 'name', 'category', 'unit', 'type', 'upda
 
 function doGet() {
   setup_();
-  return HtmlService.createHtmlOutputFromFile('Index')
+  return HtmlService.createTemplateFromFile('Index').evaluate()
     .setTitle('Menu Cost')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+/** Used by Index.html to pull in Style.html and App.html. */
+function include(name) {
+  return HtmlService.createHtmlOutputFromFile(name).getContent();
 }
 
 /** Run once from the editor (or it runs on first page load) to create the tabs. */

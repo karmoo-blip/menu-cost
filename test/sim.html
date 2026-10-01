@@ -75,15 +75,24 @@
     window.LockService = { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) };
     window.Session = { getActiveUser: () => ({ getEmail: () => window.SIM_USER || 'owner@example.com' }) };
     window.Utilities = { getUuid: () => crypto.randomUUID() };
-    window.HtmlService = { createHtmlOutputFromFile: () => ({ setTitle() { return this; }, addMetaTag() { return this; } }) };
+    // Builds the page the way Apps Script would, so the test can check Index/Style/App fit together.
+    window.SIM_FILES = {};
+    const output = html => ({ getContent: () => html, setTitle() { return this; }, addMetaTag() { return this; } });
+    window.HtmlService = {
+      createHtmlOutputFromFile: name => output(SIM_FILES[name]),
+      createTemplateFromFile: name => ({
+        evaluate: () => output(SIM_FILES[name].replace(/<\?!=\s*include\('(\w+)'\);?\s*\?>/g, (_, f) => include(f))),
+      }),
+    };
     window.SIM_STORE = () => store;
   })();
   </script>
   <script>
   (async () => {
-    const code = await (await fetch('../apps-script/Code.gs')).text();
-    (0, eval)(code);
-    doGet();
+    const get = async f => (await fetch('../apps-script/' + f)).text();
+    for (const f of ['Index', 'Style', 'App']) SIM_FILES[f] = await get(f + '.html');
+    (0, eval)(await get('Code.gs'));
+    window.SIM_PAGE = doGet().getContent();
     // google.script.run stand-in: async, JSON only, like the real thing.
     window.google = { script: { run: (function make(ok, fail) {
       return {
