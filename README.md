@@ -7,53 +7,60 @@ A small web app for a restaurant or café to work out the cost, food cost % and 
 - Several shops, each with its own currency (THB or GBP).
 - CSV import/export for ingredients, CSV export for menu costs.
 - Optional example data (only loaded when you press the button).
-- Data is saved as one JSON file per shop in **your own Google Drive**. The website itself holds no data.
 
-Plain HTML + JavaScript, no build step. Hosted on GitHub Pages.
+It runs as a **Google Apps Script web app** attached to a Google Sheet. All data is stored in tabs of that Sheet
+(`Shops`, `Ingredients`, `Menus`, `MenuItems`, `Extras`), so Google Drive is the backup. Only people you share the
+Sheet with can open the app.
 
-## Privacy
+## Files
 
-The code on GitHub is public, but it contains no shop data and no secrets. All prices and recipes live in your Google Drive. The app uses the `drive.file` permission, so it can only see files it created or files you pick — not the rest of your Drive.
+| File | What |
+|------|------|
+| `app.js`, `style.css`, `index.html` | The web page (edit these) |
+| `apps-script/Code.gs` | Server code: serves the page, reads/writes the Sheet |
+| `apps-script/Index.html` | **Generated** by `node tools/build.mjs` — page + style + script in one file for Apps Script |
+| `test/sim.html` | Runs the app against `Code.gs` with a fake Sheet, for testing without Google |
 
-## Setup
+## Setup (one time)
 
-### 1. Google Cloud (one time, free)
+1. Create a new Google Sheet at <https://sheets.new>. Name it **Menu Cost**.
+2. In the Sheet: **Extensions → Apps Script**. Name the project **Menu Cost**.
+3. Replace everything in `Code.gs` with the contents of `apps-script/Code.gs`. Save.
+4. Click **+** next to Files → **HTML**, name it `Index` (no `.html`). Replace its contents with `apps-script/Index.html`. Save.
+5. In the toolbar pick the function **setup** and click **Run**. Approve the permissions
+   (Google shows "Google hasn't verified this app" → **Advanced** → **Go to Menu Cost (unsafe)** → **Allow** — it is your own script).
+   The Sheet now has the 5 tabs.
+6. **Deploy → New deployment** → type **Web app**:
+   - Execute as: **User accessing the web app**
+   - Who has access: **Anyone with Google account**
+   - **Deploy**, copy the **Web app URL**. Bookmark it.
 
-1. Go to <https://console.cloud.google.com/>, create a project (e.g. "Menu Cost").
-2. **APIs & Services → Library**: enable **Google Drive API** and **Google Picker API**.
-3. **APIs & Services → OAuth consent screen** (Google Auth Platform):
-   - User type: **External**. App name: Menu Cost. Add your email.
-   - Scopes: add `.../auth/drive.file`.
-   - **Audience → Test users**: add your Gmail and each family member's Gmail (up to 100).
-   - Leave the app in **Testing**. Each person will see an "unverified app" warning once — click *Continue*.
-4. **Credentials → Create credentials → OAuth client ID** → *Web application*.
-   - Authorized JavaScript origins: `https://<your-github-username>.github.io` and `http://localhost:8765` (for testing).
-   - Copy the **Client ID**.
-5. **Credentials → Create credentials → API key**. Restrict it: *Application restrictions → Websites* → `https://<your-github-username>.github.io/*`, *API restrictions → Google Picker API*.
-6. Project number: **IAM & Admin → Settings → Project number**.
-7. Put the three values in `config.js`.
+Access is controlled by the Sheet's sharing: a person who can't open the Sheet can't use the app.
 
-### 2. GitHub Pages
+### Family access
 
-1. Push this folder to a GitHub repo.
-2. Repo **Settings → Pages → Build and deployment**: Source *Deploy from a branch*, branch `main`, folder `/ (root)`.
-3. Open `https://<your-github-username>.github.io/<repo-name>/`.
+Share the Google Sheet with each family member's Gmail as **Editor**, then send them the Web app URL.
+The first time, each person approves the permissions once.
 
-### 3. Family access
+If two people save the same shop at the same time, the app warns and lets you reload the other person's version instead of overwriting it.
 
-1. Open the app, create a shop.
-2. In Google Drive, find `MenuCost - <shop name>.json` and **Share** it with family (Editor).
-3. Family members open the app, sign in, press **Open a shop shared with me**, pick the file once.
+### Updating the app later
 
-If two people save at the same time, the app warns and lets you reload the other person's version instead of overwriting it.
+Edit `app.js` / `style.css`, run `node tools/build.mjs`, paste the new `apps-script/Index.html` (and `Code.gs` if changed) into the Apps Script editor, then **Deploy → Manage deployments → ✏️ → Version: New version → Deploy**. The URL stays the same.
 
-## Run locally
+## Editing data in the Sheet
+
+You can view or edit the tabs directly. Leave `shop_id` filled in on every row. New rows typed by hand can leave `id` columns empty;
+in `MenuItems` you can use `menu_name` and `ingredient_name` instead of the ids. Reload the app after editing the Sheet.
+
+## Test locally (no Google)
 
 ```sh
 python3 -m http.server 8765
 ```
 
-Open <http://localhost:8765>. With `GOOGLE_CLIENT_ID` empty in `config.js`, the app runs in "this browser only" mode (no sign-in, data in browser storage) — handy for trying it out.
+- <http://localhost:8765/> — test mode, data in this browser only.
+- <http://localhost:8765/test/sim.html> — runs the real `Code.gs` against a fake Sheet.
 
 ## CSV format (ingredients)
 

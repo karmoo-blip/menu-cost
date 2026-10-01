@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<!-- Runs the app against Code.gs with a fake Google Sheet, so the Sheet code can be tested
+     without deploying. Serve the repo root (python3 -m http.server 8765) and open /test/sim.html -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Menu Cost (simulator)</title>
+  <link rel="stylesheet" href="../style.css">
+</head>
+<body>
+  <div id="app"></div>
+  <div id="modal-root"></div>
+  <script>
+  // ---- minimal fake of the Apps Script services Code.gs uses ----
+  (function () {
+    const KEY = 'menucost_sim_sheet';
+    let store = {};
+    try { store = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
+    const persist = () => localStorage.setItem(KEY, JSON.stringify(store));
+
+    class Range {
+      constructor(sheet, r, c, nr, nc) { Object.assign(this, { sheet, r, c, nr, nc }); }
+      cells(fn) {
+        for (let i = 0; i < this.nr; i++) for (let j = 0; j < this.nc; j++) fn(this.r - 1 + i, this.c - 1 + j, i, j);
+      }
+      getValues() {
+        const out = Array.from({ length: this.nr }, () => Array(this.nc).fill(''));
+        this.cells((R, C, i, j) => { const v = this.sheet.d.cells[R]?.[C]; out[i][j] = v === undefined ? '' : v; });
+        return out;
+      }
+      setValues(vals) {
+        if (vals.length !== this.nr || vals[0].length !== this.nc) throw new Error('setValues size mismatch');
+        this.cells((R, C, i, j) => {
+          let v = vals[i][j];
+          // Like Sheets: plain cells turn numeric text into numbers and TRUE/FALSE into booleans.
+          if (this.sheet.d.fmt[C]?.[R] !== '@' && typeof v === 'string') {
+            if (v.trim() !== '' && !isNaN(Number(v))) v = Number(v);
+            else if (/^(true|false)$/i.test(v)) v = v.toLowerCase() === 'true';
+          }
+          (this.sheet.d.cells[R] ||= [])[C] = v;
+        });
+        persist(); return this;
+      }
+      clearContent() { this.cells((R, C) => { if (this.sheet.d.cells[R]) this.sheet.d.cells[R][C] = ''; }); persist(); return this; }
+      setNumberFormat(f) { this.cells((R, C) => { (this.sheet.d.fmt[C] ||= [])[R] = f; }); persist(); return this; }
+      setFontWeight() { return this; }
+    }
+    class Sheet {
+      constructor(d) { this.d = d; }
+      getName() { return this.d.name; }
+      getMaxRows() { return this.d.maxRows; }
+      getLastRow() {
+        for (let r = this.d.cells.length - 1; r >= 0; r--) if ((this.d.cells[r] || []).some(v => v !== '' && v !== undefined && v !== null)) return r + 1;
+        return 0;
+      }
+      getRange(r, c, nr = 1, nc = 1) {
+        if (r < 1 || c < 1 || nr < 1 || r + nr - 1 > this.d.maxRows || c + nc - 1 > 26) throw new Error(`Range out of bounds ${this.d.name} ${r},${c},${nr},${nc}`);
+        return new Range(this, r, c, nr, nc);
+      }
+      insertRowsAfter(_, n) { this.d.maxRows += n; persist(); }
+      setFrozenRows() {}
+    }
+    store.sheets ||= [{ name: 'Sheet1', cells: [], fmt: [], maxRows: 20 }];
+    const ss = {
+      getSheetByName: n => { const d = store.sheets.find(s => s.name === n); return d ? new Sheet(d) : null; },
+      insertSheet: n => { const d = { name: n, cells: [], fmt: [], maxRows: 20 }; store.sheets.push(d); persist(); return new Sheet(d); },
+      deleteSheet: sh => { store.sheets = store.sheets.filter(s => s !== sh.d); persist(); },
+      getSheets: () => store.sheets.map(d => new Sheet(d)),
+      getId: () => 'sim-sheet', getUrl: () => 'https://docs.google.com/spreadsheets/d/sim-sheet', getName: () => 'Menu Cost',
+    };
+    const props = {};
+    window.SpreadsheetApp = { getActiveSpreadsheet: () => ss, openById: () => ss };
+    window.PropertiesService = { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) };
+    window.LockService = { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) };
+    window.Session = { getActiveUser: () => ({ getEmail: () => window.SIM_USER || 'owner@example.com' }) };
+    window.Utilities = { getUuid: () => crypto.randomUUID() };
+    window.HtmlService = { createHtmlOutputFromFile: () => ({ setTitle() { return this; }, addMetaTag() { return this; } }) };
+    window.SIM_STORE = () => store;
+  })();
+  </script>
+  <script>
+  (async () => {
+    const code = await (await fetch('../apps-script/Code.gs')).text();
+    (0, eval)(code);
+    doGet();
+    // google.script.run stand-in: async, JSON only, like the real thing.
+    window.google = { script: { run: (function make(ok, fail) {
+      return {
+        withSuccessHandler: f => make(f, fail),
+        withFailureHandler: f => make(ok, f),
+        api: (action, args) => setTimeout(() => {
+          try { ok?.(api(action, args)); } catch (e) { fail?.(e); }
+        }, 50),
+      };
+    })() } };
+    const s = document.createElement('script');
+    s.src = '../app.js';
+    document.body.appendChild(s);
+  })();
+  </script>
+</body>
+</html>
