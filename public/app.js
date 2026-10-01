@@ -706,7 +706,7 @@ function renderSaveStatusText() {
     case 'error': return `Not saved — <button class="btn link" data-action="retry-save">retry</button>`;
     default: {
       const who = state.meta?.by ? ` by ${esc(state.meta.by)}` : '';
-      return `Saved ✓${who} ${esc(fmtTime(state.meta?.modifiedTime))}`;
+      return `Saved ✓<span class="wide-only">${who} ${esc(fmtTime(state.meta?.modifiedTime))}</span>`;
     }
   }
 }
@@ -718,7 +718,7 @@ function renderSaveStatus() {
   el.title = state.saveState === 'error' ? state.saveError : '';
 }
 
-const TABS = [['menus', 'Menus'], ['ingredients', 'Ingredients'], ['extras', 'Extra costs'], ['settings', 'Settings']];
+const TABS = [['menus', 'Menus'], ['ingredients', 'Ingredients'], ['extras', 'Extra costs', 'Extras'], ['settings', 'Settings']];
 
 function renderApp() {
   const body = {
@@ -726,14 +726,15 @@ function renderApp() {
   }[state.tab]?.() ?? renderMenus();
   return `
     <header class="topbar"><div class="wrap">
-      <span class="brand">☕ Menu Cost</span>
+      <span class="brand">☕<span class="wide-only"> Menu Cost</span></span>
       <span class="shop-name" title="${esc(state.data.shopName)}">${esc(state.data.shopName)}</span>
-      <button class="btn small" data-action="switch-shop">Switch shop</button>
+      <button class="btn small switch-btn" data-action="switch-shop">Switch<span class="wide-only"> shop</span></button>
       <span class="spacer"></span>
       <span class="save-status">${renderSaveStatusText()}</span>
     </div>
     <div class="wrap"><nav class="tabs">
-      ${TABS.map(([k, v]) => `<button class="tab ${state.tab === k ? 'active' : ''}" data-action="tab" data-tab="${k}">${v}</button>`).join('')}
+      ${TABS.map(([k, v, short]) => `<button class="tab ${state.tab === k ? 'active' : ''}" data-action="tab" data-tab="${k}">${short
+        ? `<span class="wide-only">${v}</span><span class="phone-only">${short}</span>` : v}</button>`).join('')}
     </nav></div></header>
     <main><div class="wrap">${body}</div></main>`;
 }
@@ -784,20 +785,20 @@ function renderMenus() {
       <button class="btn primary" data-action="add-menu">+ Add menu</button>
       <button class="btn" data-action="export-menus">Export CSV</button>
     </div>
-    <div class="card table-wrap"><table>
+    <div class="card table-wrap"><table class="rtable menus-table">
       <thead><tr><th>Menu</th><th class="num">Cost / plate</th><th class="num">Extras</th><th class="num">Sell price</th><th>Food cost</th><th class="num">Profit / plate</th><th class="num">Suggested price</th></tr></thead>
       <tbody>${menus.map(m => {
         const c = calcMenu(m);
         return `<tr class="clickable" data-action="edit-menu" data-id="${esc(m.id)}">
-          <td><b>${esc(m.name)}</b>${m.category ? `<span class="tag">${esc(m.category)}</span>` : ''}${m.example ? '<span class="tag">example</span>' : ''}${c.problems ? '<span class="pill bad" style="margin-left:6px">check</span>' : ''}</td>
-          <td class="num">${money(c.ingredientCost)}</td>
-          <td class="num muted">${c.extrasCost ? money(c.extrasCost) : '—'}</td>
-          <td class="num">${money(num(m.sellPrice))}</td>
-          <td>${statusPill(c)}</td>
-          <td class="num" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}</td>
-          <td class="num muted">${money(c.suggestedPrice)}</td>
+          <td class="c-name"><b>${esc(m.name)}</b>${m.category ? `<span class="tag">${esc(m.category)}</span>` : ''}${m.example ? '<span class="tag">example</span>' : ''}${c.problems ? '<span class="pill bad check-pill">check</span>' : ''}</td>
+          <td class="num c-cost" data-label="Cost">${money(c.ingredientCost)}</td>
+          <td class="num muted c-extras" data-label="Extras">${c.extrasCost ? money(c.extrasCost) : '—'}</td>
+          <td class="num c-sell" data-label="Sell">${money(num(m.sellPrice))}</td>
+          <td class="c-pill">${statusPill(c)}</td>
+          <td class="num c-profit" data-label="Profit" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}</td>
+          <td class="num muted c-suggested" data-label="Suggested">${money(c.suggestedPrice)}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="7" class="muted">No menus match "${esc(state.search)}".</td></tr>`}</tbody>
+      }).join('') || `<tr><td colspan="7" class="muted no-match">No menus match "${esc(state.search)}".</td></tr>`}</tbody>
     </table></div>
     <p class="muted" style="font-size:.85rem">Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Suggested price hits your ${d.targetCostPct}% target.</p>`;
 }
@@ -807,8 +808,8 @@ function renderMenus() {
 function renderIngredients() {
   const d = state.data;
   const tools = `
-      <button class="btn" data-action="import-csv">Import CSV</button>
-      <button class="btn" data-action="template-csv">Download CSV template</button>`;
+      <button class="btn wide-only" data-action="import-csv">Import CSV</button>
+      <button class="btn wide-only" data-action="template-csv">Download CSV template</button>`;
   if (!d.ingredients.length) {
     return exampleEmptyState('No ingredients yet', 'Add what you buy: the price you pay and the pack size. You can also import a CSV file from Excel or Google Sheets.', 'add-ingredient', '+ Add ingredient', tools);
   }
@@ -818,20 +819,21 @@ function renderIngredients() {
       ${searchBox('Search ingredients…')}
       <button class="btn primary" data-action="add-ingredient">+ Add ingredient</button>
       ${tools}
-      <button class="btn" data-action="export-ingredients">Export CSV</button>
+      <button class="btn wide-only" data-action="export-ingredients">Export CSV</button>
+      <button class="btn phone-only" data-action="csv-menu">CSV ▾</button>
     </div>
-    <div class="card table-wrap"><table>
+    <div class="card table-wrap"><table class="rtable ingredients-table">
       <thead><tr><th>Ingredient</th><th class="num">Buy price</th><th class="num">Pack size</th><th class="num">Cost per unit</th><th class="num">Used in</th></tr></thead>
       <tbody>${list.map(i => {
         const used = menusUsing(i.id).length;
         return `<tr class="clickable" data-action="edit-ingredient" data-id="${esc(i.id)}">
-          <td><b>${esc(i.name)}</b>${i.example ? '<span class="tag">example</span>' : ''}</td>
-          <td class="num">${money(i.buyPrice)}</td>
-          <td class="num">${fmtNum(i.packSize)} ${esc(i.unit)}</td>
-          <td class="num">${money(costPerPackUnit(i), 4)} / ${esc(i.unit)}</td>
-          <td class="num muted">${used ? used + (used === 1 ? ' menu' : ' menus') : '—'}</td>
+          <td class="c-name"><b>${esc(i.name)}</b>${i.example ? '<span class="tag">example</span>' : ''}</td>
+          <td class="num c-buy" data-label="Buy price">${money(i.buyPrice)}</td>
+          <td class="num c-pack" data-label="Pack">${fmtNum(i.packSize)} ${esc(i.unit)}</td>
+          <td class="num c-unit" data-label="Per unit">${money(costPerPackUnit(i), 4)} / ${esc(i.unit)}</td>
+          <td class="num muted c-used">${used ? `<span class="phone-only">Used in </span>${used}${used === 1 ? ' menu' : ' menus'}` : '<span class="wide-only">—</span><span class="phone-only">Not used yet</span>'}</td>
         </tr>`;
-      }).join('') || `<tr><td colspan="5" class="muted">No ingredients match "${esc(state.search)}".</td></tr>`}</tbody>
+      }).join('') || `<tr><td colspan="5" class="muted no-match">No ingredients match "${esc(state.search)}".</td></tr>`}</tbody>
     </table></div>`;
 }
 
@@ -847,12 +849,12 @@ function renderExtras() {
   }
   return intro + `
     <div class="toolbar"><button class="btn primary" data-action="add-extra">+ Add extra cost</button></div>
-    <div class="card table-wrap"><table>
+    <div class="card table-wrap"><table class="rtable extras-table">
       <thead><tr><th>Name</th><th>Type</th><th class="num">Amount</th></tr></thead>
       <tbody>${d.extras.map(e => `<tr class="clickable" data-action="edit-extra" data-id="${esc(e.id)}">
-        <td><b>${esc(e.name)}</b>${e.example ? '<span class="tag">example</span>' : ''}</td>
-        <td>${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</td>
-        <td class="num">${e.type === 'percent' ? fmtNum(e.value) + '%' : money(e.value)}</td>
+        <td class="c-name"><b>${esc(e.name)}</b>${e.example ? '<span class="tag">example</span>' : ''}</td>
+        <td class="c-type">${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</td>
+        <td class="num c-amount">${e.type === 'percent' ? fmtNum(e.value) + '%' : money(e.value)}</td>
       </tr>`).join('')}</tbody>
     </table></div>`;
 }
@@ -898,6 +900,7 @@ function openModal({ title, body, buttons = [], wide = false, onOpen }) {
     ${buttons.length ? `<div class="modal-foot">${buttons.map((b, i) => `<button class="btn ${b.className || ''}" data-btn="${i}" ${b.submit ? 'type="submit"' : ''}>${esc(b.label)}</button>`).join('')}</div>` : ''}
   </div></div>`;
   const modal = $('.modal', root);
+  document.body.classList.add('modal-open');
   $('[data-close]', root).onclick = closeModal;
   $('.modal-backdrop', root).addEventListener('mousedown', e => { if (e.target.classList.contains('modal-backdrop')) closeModal(); });
   buttons.forEach((b, i) => {
@@ -907,12 +910,14 @@ function openModal({ title, body, buttons = [], wide = false, onOpen }) {
     };
   });
   onOpen?.(modal);
+  // On touch screens, focusing would pop up the keyboard and hide the form.
   const first = $('input, select', modal);
-  if (first) first.focus();
+  if (first && !matchMedia('(pointer: coarse)').matches) first.focus();
   return modal;
 }
 function closeModal() {
   $('#modal-root').innerHTML = '';
+  document.body.classList.remove('modal-open');
 }
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('#modal-root').innerHTML) closeModal();
@@ -1054,7 +1059,7 @@ function menuModal(menu) {
       <td class="qty"><input type="number" data-field="qty" value="${esc(line.qty)}" min="0" step="any" placeholder="0"></td>
       <td class="unit"><select data-field="unit">${unitOptions(line.unit, base)}</select></td>
       <td class="num line-cost">${money(recipeLineCost(line))}</td>
-      <td><button class="btn link" type="button" data-remove="${idx}" aria-label="Remove">✕</button></td>
+      <td class="rm"><button class="btn link" type="button" data-remove="${idx}" aria-label="Remove">✕</button></td>
     </tr>`;
   };
 
@@ -1238,6 +1243,17 @@ const ACTIONS = {
   'add-extra': () => extraModal(null),
   'edit-extra': el => extraModal(state.data.extras.find(e => e.id === el.dataset.id)),
   'import-csv': importModal,
+  'csv-menu': () => openModal({
+    title: 'CSV',
+    body: `<div class="sheet-actions">
+      <button class="btn" data-sheet="import-csv">Import CSV</button>
+      <button class="btn" data-sheet="template-csv">Download CSV template</button>
+      <button class="btn" data-sheet="export-ingredients">Export CSV</button>
+    </div>`,
+    onOpen: modal => $$('[data-sheet]', modal).forEach(b => {
+      b.onclick = () => { closeModal(); ACTIONS[b.dataset.sheet](); };
+    }),
+  }),
   'template-csv': () => download('ingredients-template.csv', templateCSV()),
   'export-ingredients': () => download(`${state.data.shopName} - ingredients.csv`, ingredientsCSV()),
   'export-menus': () => download(`${state.data.shopName} - menu costs.csv`, menusCSV()),

@@ -49,7 +49,7 @@ h1, h2, h3 { margin: 0; line-height: 1.2; }
 h2 { font-size: 1.25rem; }
 a { color: var(--accent); }
 
-.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left)); }
 
 /* Header */
 .topbar {
@@ -173,7 +173,130 @@ input.error { border-color: var(--bad); }
 
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 8px; z-index: 60; max-width: calc(100% - 32px); }
 
-@media (max-width: 600px) {
-  .shop-name { max-width: 50vw; }
-  .modal-backdrop { padding: 8px; }
+/* Shown only on phones / only on wider screens */
+.phone-only { display: none; }
+
+/* ---------- touch screens (phones and tablets) ---------- */
+@media (pointer: coarse) {
+  /* 16px stops iPhone/iPad zooming in when a box is tapped */
+  input, select, textarea { font-size: 16px; }
+  .btn { min-height: 44px; }
+  .btn.small { min-height: 36px; }
+  .btn.link { min-height: 36px; }
+  input[type=text], input[type=number], input[type=search], input[type=password], select { min-height: 44px; }
+  .tab { min-height: 44px; }
+}
+
+/* ---------- tablets (iPad upright) ---------- */
+@media (min-width: 721px) and (max-width: 1000px) {
+  th, td { padding: 9px 8px; }
+  th { white-space: normal; font-size: .72rem; vertical-align: bottom; }
+  .rtable td { font-size: .92rem; }
+  /* Let the name column wrap (tags go under the name) so every column fits */
+  .rtable td.c-name { white-space: normal; min-width: 130px; }
+  .rtable td.c-name .tag { margin: 2px 6px 0 0; }
+  .rtable td.c-name b { margin-right: 6px; }
+}
+
+/* ---------- phones ---------- */
+@media (max-width: 720px) {
+  .phone-only { display: revert; }
+  .wide-only { display: none !important; }
+  body.modal-open { overflow: hidden; }
+
+  /* Top bar: ☕ · shop name · Saved ✓ · Switch */
+  .topbar .wrap:first-child { gap: 10px; padding-top: 12px; padding-bottom: 12px; flex-wrap: nowrap; }
+  .brand { font-size: 1.1rem; }
+  .shop-name { order: 1; flex: 1; min-width: 0; max-width: none; color: var(--text); font-weight: 600; }
+  .topbar .spacer { display: none; }
+  .save-status { order: 2; font-size: .8rem; }
+  .switch-btn { order: 3; }
+  .tabs { gap: 0; flex: 1; }
+  .tab { flex: 1; padding: 12px 4px; font-size: .92rem; }
+
+  main { padding: 18px 0 40px; }
+  .stats { grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+  .stat { padding: 14px 16px; }
+  .stat .value { font-size: 1.3rem; }
+  .toolbar { gap: 10px; margin: 0 0 18px; }
+  .toolbar input[type=search] { flex: 1 1 100%; }
+  .toolbar .btn { flex: 1; }
+
+  /* Tables become a list of cards */
+  .card.table-wrap:has(.rtable) { background: none; border: 0; box-shadow: none; overflow: visible; }
+  .rtable, .rtable tbody { display: block; }
+  .rtable thead { display: none; }
+  .rtable tr {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 14px;
+  }
+  .rtable tr.clickable:active { background: var(--surface-2); }
+  .rtable td { display: block; padding: 0; border: 0; white-space: normal; min-width: 0; text-align: left; }
+  .rtable td.no-match { grid-column: 1 / -1; }
+  .rtable td[data-label] { padding: 12px 12px 0 0; margin-top: 12px; border-top: 1px solid var(--border); font-weight: 600; }
+  .rtable td[data-label]::before {
+    content: attr(data-label); display: block; margin-bottom: 3px;
+    font-size: .72rem; font-weight: 400; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+  }
+  .rtable .c-name b { display: block; font-size: 1.05rem; }
+  .rtable .c-name .tag { background: none; padding: 0; margin: 3px 10px 0 0; font-size: .82rem; }
+  .rtable .check-pill { margin-top: 6px; }
+
+  /* Last column is at least as wide as the food cost pill, so it never wraps */
+  .menus-table tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(max-content, 1fr); grid-template-areas: "name name pill" "sell cost profit"; }
+  .menus-table .c-pill .pill { white-space: nowrap; }
+  .menus-table .c-name { grid-area: name; padding-right: 10px; }
+  .menus-table .c-pill { grid-area: pill; justify-self: end; }
+  .menus-table .c-sell { grid-area: sell; }
+  .menus-table .c-cost { grid-area: cost; }
+  .menus-table .c-profit { grid-area: profit; }
+  .menus-table .c-extras, .menus-table .c-suggested { display: none; }
+
+  .ingredients-table tr { grid-template-areas: "name name name" "used used used" "buy pack unit"; }
+  .ingredients-table .c-name { grid-area: name; }
+  .ingredients-table .c-used { grid-area: used; font-size: .82rem; margin-top: 3px; }
+  .ingredients-table .c-buy { grid-area: buy; }
+  .ingredients-table .c-pack { grid-area: pack; }
+  .ingredients-table .c-unit { grid-area: unit; }
+
+  .extras-table tr { grid-template-areas: "name name amount" "type type type"; }
+  .extras-table .c-name { grid-area: name; }
+  .extras-table .c-amount { grid-area: amount; justify-self: end; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .extras-table .c-type { grid-area: type; color: var(--muted); font-size: .82rem; margin-top: 3px; }
+
+  /* Pop-ups fill the screen, buttons pinned at the bottom */
+  .modal-backdrop { padding: 0; overflow: hidden; }
+  .modal, .modal.wide { max-width: none; height: 100%; border-radius: 0; display: flex; flex-direction: column; }
+  .modal-head { padding: 14px 18px; padding-top: max(14px, env(safe-area-inset-top)); }
+  .modal-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 18px; }
+  .modal-foot { gap: 10px; padding: 12px 18px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .modal-foot .btn { flex: 1 1 40%; }
+  .modal-foot .left { margin-right: 0; }
+  label.field { margin-bottom: 16px; }
+  label.field > span { margin-bottom: 6px; }
+  .row { gap: 14px; }
+  .row > * { min-width: 0; }
+  /* Name + category: give each its own line */
+  #menu-form > .row:first-child > * { flex-basis: 100%; }
+
+  /* Recipe lines: ingredient on top, amount / unit / cost / remove below */
+  .recipe-table, .recipe-table tbody { display: block; }
+  .recipe-table thead { display: none; }
+  .recipe-table tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto 40px; gap: 10px; align-items: center;
+    grid-template-areas: "ing ing ing ing" "qty unit cost rm";
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px;
+  }
+  .recipe-table td { display: block; padding: 0; border: 0; width: auto; min-width: 0; }
+  .recipe-table .ing { grid-area: ing; min-width: 0; }
+  .recipe-table .qty { grid-area: qty; width: auto; }
+  .recipe-table .unit { grid-area: unit; width: auto; }
+  .recipe-table .line-cost { grid-area: cost; min-width: 64px; font-weight: 600; }
+  .recipe-table .rm { grid-area: rm; text-align: center; }
+  .summary { padding: 14px 16px; margin-top: 18px; }
+  .summary dl { gap: 8px 12px; }
+
+  .sheet-actions { display: flex; flex-direction: column; gap: 10px; }
+  .center-page { padding: 16px; }
 }
