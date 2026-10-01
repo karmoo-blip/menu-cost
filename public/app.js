@@ -2,13 +2,13 @@
 
 /* ============================================================
    Menu Cost — work out the cost of every menu item.
-   Data lives in tabs of a Google Sheet (served by Apps Script),
-   or in this browser only when opened outside Apps Script.
+   Data lives in a Cloudflare D1 database (served by the Worker),
+   or in this browser only when opened from localhost for testing.
    ============================================================ */
 
-// True when served by Google Apps Script (data in Google Sheet).
+// True when served by the Cloudflare Worker (data in D1).
 // False when opened from a local file server (data in this browser only, for testing).
-const IN_SHEET = !!window.google?.script?.run;
+const ONLINE = !['localhost', '127.0.0.1', ''].includes(location.hostname);
 const DATA_VERSION = 1;
 const SAVE_DELAY_MS = 1500;
 
@@ -371,7 +371,6 @@ const LocalStore = {
     try { return JSON.parse(lsGet(this.key) || '{}'); } catch { return {}; }
   },
   write(all) { lsSet(this.key, JSON.stringify(all)); },
-  async userName() { return 'This browser'; },
   async listShops() {
     return Object.entries(this.all()).map(([id, s]) => ({
       id, name: s.data.shopName, currency: s.data.currency, modifiedTime: s.modifiedTime, owner: '',
@@ -403,41 +402,48 @@ const LocalStore = {
   },
 };
 
-/* ---------- storage: Google Sheet (Apps Script) ---------- */
+/* ---------- storage: Cloudflare (Worker + D1) ---------- */
 
-// Calls a function in Code.gs. Data goes over as JSON text.
-function callServer(action, ...args) {
-  return new Promise((resolve, reject) => {
-    google.script.run
-      .withSuccessHandler(text => resolve(JSON.parse(text)))
-      .withFailureHandler(err => reject(new Error(err?.message || String(err))))
-      .api(action, JSON.stringify(args));
+// Calls the Worker API. The sign-in cookie goes along automatically.
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: 'same-origin',
   });
+  let json = null;
+  try { json = await res.json(); } catch { /* not JSON, e.g. login page after session expired */ }
+  if (res.status === 409 && json?.conflict) throw Object.assign(new Error('conflict'), json);
+  if (res.status === 401) {
+    throw Object.assign(new Error(json?.error || 'You were signed out. Enter the family password again.'), { auth: true });
+  }
+  if (!res.ok || !json) {
+    throw Object.assign(new Error(json?.error || `Server error (${res.status}). Check your internet and try again.`),
+      { status: res.status, retryAfter: json?.retryAfter });
+  }
+  return json;
 }
 
-const SheetStore = {
-  info: null,
-  async userName() {
-    this.info = await callServer('whoAmI');
-    return this.info.email;
-  },
-  listShops() { return callServer('listShops'); },
-  create(data) { return callServer('createShop', data); },
-  load(id) { return callServer('loadShop', id); },
-  async save(id, data, expectedModifiedTime) {
-    const res = await callServer('saveShop', id, data, expectedModifiedTime);
-    if (res.conflict) throw Object.assign(new Error('conflict'), res);
-    return res;
+const ApiStore = {
+  async login(password) { await api('POST', '/api/login', { password }); },
+  async logout() { await api('POST', '/api/logout'); },
+  listShops() { return api('GET', '/api/shops'); },
+  create(data) { return api('POST', '/api/shops', data); },
+  load(id) { return api('GET', `/api/shops/${encodeURIComponent(id)}`); },
+  save(id, data, expectedModifiedTime) {
+    return api('PUT', `/api/shops/${encodeURIComponent(id)}`, { data, expectedModifiedTime });
   },
 };
 
-const store = IN_SHEET ? SheetStore : LocalStore;
+const store = ONLINE ? ApiStore : LocalStore;
 
 /* ---------- app state & saving ---------- */
 
 const state = {
-  screen: 'loading',  // loading | shops | app
-  userName: '',
+  screen: 'loading',  // loading | login | shops | app
+  loginError: '',
+  loginLocked: false,
   shops: [],
   shopId: null,
   meta: null,         // { modifiedTime, by }
@@ -479,6 +485,8 @@ async function saveNow() {
       state.saveState = 'error';
       state.saveError = err.message;
       if (err.conflict) showConflict(err);
+      // Unsaved changes stay in memory and are saved again after signing in.
+      if (err.auth) showLogin('You were signed out. Sign in again to save your changes.');
     }
   })();
   await saving;
@@ -514,24 +522,89 @@ document.addEventListener('visibilitychange', () => {
 async function start() {
   render();
   try {
-    state.userName = await store.userName();
-    state.screen = 'shops';
-    await refreshShops();
-    const last = lsGet('menucost_last_shop');
-    if (last && state.shops.some(s => s.id === last)) await openShop(last);
+    state.shops = await store.listShops();
   } catch (err) {
+    if (err.auth) { showLogin(); return; }
     showFatal(`<h2>Could not open Menu Cost</h2><p class="error-text">${esc(err.message)}</p>
-      <p class="muted">Check you have access to the Google Sheet, then reload the page.</p>`);
+      <p class="muted">Check your internet connection, then reload the page.</p>`);
+    return;
   }
+  await showShopsAndLastShop();
+}
+
+async function showShopsAndLastShop() {
+  state.screen = 'shops';
+  await refreshShops();
+  const last = lsGet('menucost_last_shop');
+  if (last && state.shops.some(s => s.id === last)) await openShop(last);
+}
+
+// Shows a toast, or the sign-in screen when the sign-in has expired.
+function showError(err) {
+  if (err.auth) showLogin(err.message);
+  else toast(err.message);
 }
 
 async function refreshShops() {
   try {
     state.shops = await store.listShops();
   } catch (err) {
+    if (err.auth) { showLogin(); return; }
     toast(err.message);
   }
   render();
+}
+
+/* ---------- sign-in ---------- */
+
+let unlockTimer = null;
+
+function showLogin(message = '') {
+  closeModal();
+  clearTimeout(unlockTimer);
+  state.screen = 'login';
+  state.loginError = message;
+  state.loginLocked = false;
+  render();
+}
+
+async function signIn(password) {
+  try {
+    await store.login(password);
+  } catch (err) {
+    state.loginLocked = err.status === 429;
+    state.loginError = err.message;
+    render();
+    if (state.loginLocked) {
+      clearTimeout(unlockTimer);
+      unlockTimer = setTimeout(() => { state.loginLocked = false; state.loginError = ''; render(); }, (err.retryAfter || 900) * 1000);
+    } else {
+      const input = $('#login-password');
+      input.value = password;
+      input.focus();
+      input.select();
+    }
+    return;
+  }
+  state.loginError = '';
+  if (state.data && state.shopId) {
+    // Signed out in the middle of editing: go back to the shop and save what is pending.
+    state.screen = 'app';
+    render();
+    if (state.saveState === 'error' || state.saveState === 'dirty') { state.saveState = 'dirty'; saveNow(); }
+  } else {
+    await showShopsAndLastShop();
+  }
+}
+
+async function signOut() {
+  if (state.saveState === 'dirty' || state.saveState === 'saving') await saveNow();
+  try { await store.logout(); } catch { /* cookie is cleared server-side; ignore network errors */ }
+  state.shops = [];
+  state.shopId = null;
+  state.data = null;
+  state.meta = null;
+  showLogin();
 }
 
 async function createShop(name, currency) {
@@ -553,7 +626,7 @@ async function openShop(id) {
     lsSet('menucost_last_shop', id);
     render();
   } catch (err) {
-    toast(err.message);
+    showError(err);
   }
 }
 
@@ -574,9 +647,31 @@ function showFatal(html) {
 function render() {
   const app = $('#app');
   if (state.screen === 'loading') app.innerHTML = '<div class="center-page muted">Loading…</div>';
+  else if (state.screen === 'login') app.innerHTML = renderLogin();
   else if (state.screen === 'shops') app.innerHTML = renderShops();
   else app.innerHTML = renderApp();
   bind();
+}
+
+function renderLogin() {
+  const bad = state.loginError && !state.loginLocked;
+  return `<div class="center-page"><div class="card pad center-card">
+    <h1>Menu Cost</h1>
+    <p class="muted" style="margin:0">Enter the family password.</p>
+    <form id="login-form">
+      <label class="field"><span>Password</span>
+        <input type="password" name="password" id="login-password" autocomplete="current-password" required
+          class="${bad ? 'error' : ''}" ${state.loginLocked ? 'disabled' : ''}></label>
+      <label class="check"><input type="checkbox" id="login-show"> Show password</label>
+      ${state.loginError ? `<p class="login-msg ${state.loginLocked ? 'warn' : 'bad'}">${esc(state.loginError)}</p>` : ''}
+      <button class="btn primary" type="submit" ${state.loginLocked ? 'disabled' : ''}>Sign in</button>
+    </form>
+  </div></div>`;
+}
+
+function signedInLine() {
+  return `<div class="signed-in"><p class="muted" style="margin:0">Signed in on this device</p>
+    <button class="btn link" data-action="sign-out">Sign out</button></div>`;
 }
 
 function renderShops() {
@@ -590,7 +685,7 @@ function renderShops() {
     : `<p class="muted">No shops yet. Create your first one below.</p>`;
   return `<div class="center-page"><div class="card pad center-card">
     <h1>Choose a shop</h1>
-    <p class="muted" style="margin:0">${IN_SHEET ? `Signed in as ${esc(state.userName)}` : 'Test mode: data is saved in this browser only.'}</p>
+    ${ONLINE ? signedInLine() : '<p class="muted" style="margin:0">Test mode: data is saved in this browser only.</p>'}
     ${list}
     <hr class="divider">
     <h2 style="margin-bottom:12px">Create new shop</h2>
@@ -785,12 +880,11 @@ function renderSettings() {
     </div>
     <hr class="divider">
     <h3 style="margin-bottom:8px">Backup</h3>
-    <p class="muted" style="margin-top:0">${IN_SHEET
-      ? `Saved automatically in the Google Sheet “${esc(SheetStore.info.sheetName)}” (all shops, one tab per table).
-         To let family use the app, share that Sheet with their Gmail as Editor. <a href="${esc(SheetStore.info.sheetUrl)}" target="_blank" rel="noopener">Open the Google Sheet</a>`
+    <p class="muted" style="margin-top:0">${ONLINE
+      ? 'Saved automatically in your Cloudflare database. To let family use the app, send them the link and the family password.'
       : 'Test mode: saved in this browser only. Download a backup file to keep a copy.'}</p>
     <div class="toolbar"><button class="btn" data-action="download-backup">Download backup (.json)</button></div>
-    ${IN_SHEET ? `<hr class="divider"><p class="muted" style="margin:0">Signed in as ${esc(state.userName)}</p>` : ''}
+    ${ONLINE ? `<hr class="divider">${signedInLine()}` : ''}
   </div>`;
 }
 
@@ -1133,6 +1227,7 @@ function setTab(tab) {
 const ACTIONS = {
   'open-shop': el => openShop(el.dataset.id),
   'switch-shop': switchShop,
+  'sign-out': signOut,
   'tab': el => setTab(el.dataset.tab),
   'retry-save': () => { state.saveState = 'dirty'; saveNow(); },
   'go-ingredients': () => setTab('ingredients'),
@@ -1171,6 +1266,18 @@ function bind() {
       s.focus(); s.setSelectionRange(pos, pos);
     };
   }
+  const login = $('#login-form');
+  if (login) {
+    const input = $('#login-password');
+    if (!state.loginLocked) input.focus();
+    $('#login-show').onchange = e => { input.type = e.target.checked ? 'text' : 'password'; };
+    login.onsubmit = async e => {
+      e.preventDefault();
+      if (!input.value) return;
+      $('button[type=submit]', login).disabled = true;
+      await signIn(input.value);
+    };
+  }
   const newShop = $('#new-shop-form');
   if (newShop) {
     newShop.onsubmit = async e => {
@@ -1183,7 +1290,7 @@ function bind() {
       }
       $('button[type=submit]', newShop).disabled = true;
       try { await createShop(name, v.currency); }
-      catch (err) { toast(err.message); $('button[type=submit]', newShop).disabled = false; }
+      catch (err) { showError(err); const b = $('button[type=submit]', newShop); if (b) b.disabled = false; }
     };
   }
   const settings = $('#settings-form');

@@ -1,0 +1,18 @@
+name = "menu-cost"
+main = "worker/worker.js"
+compatibility_date = "2026-09-01"
+# Only the main workers.dev address. No per-version preview URLs.
+preview_urls = false
+
+# Page files (index.html, app.js, style.css). /api/* goes to worker.js.
+[assets]
+directory = "public"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "menu-cost"
+database_id = "b7a459ac-ca5d-4f64-b468-3be5a8eedd20"
+
+# Sign-in password: set with `npx wrangler secret put APP_PASSWORD` (never put it in this file).
