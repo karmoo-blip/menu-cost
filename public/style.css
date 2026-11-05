@@ -340,6 +340,35 @@ code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; }
 .extras-pick .amt { margin-left: auto; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
 .extras-pick .hint { margin: 6px 0 0; }
 
+/* ---------- pack size calculator (ingredient pop-up) ---------- */
+.calc-toggle {
+  display: inline-flex; gap: 6px; align-items: center; margin: -4px 0 14px;
+  border: 1px dashed var(--border); background: none; color: var(--accent);
+  font-weight: 700; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+}
+.calc-toggle:hover { background: var(--surface-2); }
+.calc { background: var(--lav-bg); border-radius: var(--radius); padding: 14px 16px; margin: -4px 0 14px; display: grid; gap: 10px; }
+.calc-title { display: flex; justify-content: space-between; align-items: center; font-weight: 800; color: var(--lav); }
+.calc-title button { border: 0; background: none; color: var(--lav); cursor: pointer; padding: 4px 6px; }
+.calc-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) 84px; gap: 8px; align-items: end; }
+.calc-times { padding-bottom: 10px; font-weight: 800; color: var(--lav); }
+.calc label.field { margin: 0; }
+.calc label.field > span { color: var(--lav); }
+.calc input, .calc select { background: var(--surface); }
+.calc-result { background: var(--surface); border-radius: 14px; padding: 10px 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.calc-result.empty { color: var(--muted); font-weight: 600; font-size: .9rem; }
+.calc-sum { flex: 1; min-width: 160px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.calc-sum small { display: block; font-weight: 600; color: var(--muted); }
+.notice { border-radius: 14px; padding: 10px 12px; font-size: .88rem; font-weight: 600; }
+.notice b { font-weight: 800; }
+.notice.ok { background: var(--ok-bg); color: var(--ok); }
+.notice.warn { background: var(--warn-bg); color: var(--warn); }
+.notice.bad { background: var(--bad-bg); color: var(--bad); }
+
+/* Menu editor: hint under a by-the-piece ingredient line */
+.recipe-table tr.line-hint td { background: none; padding: 0 8px 4px; font-size: .8rem; font-weight: 600; color: var(--muted); white-space: normal; }
+.recipe-table tr.line-hint .btn.link { padding: 0 2px; min-height: 0; font-weight: 800; }
+
 /* ---------- toast ---------- */
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
@@ -491,6 +520,10 @@ code { background: var(--surface-2); padding: 1px 6px; border-radius: 6px; }
   .recipe-table .line-cost { grid-area: cost; min-width: 64px; }
   .recipe-table .rm { grid-area: rm; text-align: center; }
 
+  .calc-grid { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+  .calc-grid .calc-unit { grid-column: 3; }
+  .recipe-table tr.line-hint { display: block; background: none; padding: 0 4px; margin: -4px 0 12px; border-radius: 0; }
+  .recipe-table tr.line-hint td { display: block; padding: 0; }
   .sheet-actions { display: flex; flex-direction: column; gap: 10px; }
   .center-card.pad { padding: 22px; }
 }

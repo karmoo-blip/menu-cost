@@ -1168,8 +1168,10 @@ function renderSettings() {
 
 /* ---------- modals ---------- */
 
-function openModal({ title, body, buttons = [], wide = false, onOpen }) {
+let modalOnClose = null;
+function openModal({ title, body, buttons = [], wide = false, onOpen, onClose }) {
   const root = $('#modal-root');
+  modalOnClose = onClose || null;
   root.innerHTML = `<div class="modal-backdrop"><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}">
     <div class="modal-head"><h2>${esc(title)}</h2><button class="btn link" data-close aria-label="Close">✕</button></div>
     <div class="modal-body">${body}</div>
@@ -1192,8 +1194,11 @@ function openModal({ title, body, buttons = [], wide = false, onOpen }) {
   return modal;
 }
 function closeModal() {
+  const after = modalOnClose;
+  modalOnClose = null;
   $('#modal-root').innerHTML = '';
   unlockPage();
+  after?.();
 }
 
 /* Phones show a pop-up as a normal full page (see style.css), so the iPhone keyboard
@@ -1229,13 +1234,68 @@ function unitOptions(selected, base) {
     .map(u => `<option value="${u}" ${u === selected ? 'selected' : ''}>${u}</option>`).join('');
 }
 
-function ingredientModal(ing) {
+// Units for "size of each" in the pack size calculator: weight or volume, not pieces.
+const SIZE_UNITS = Object.keys(UNITS).filter(u => UNITS[u].base !== 'pcs');
+
+// Menu lines that use an ingredient by the piece become an amount of `unit`: 1 pcs → `each` unit.
+function convertPieceLines(items, ingredientId, each, unit) {
+  for (const line of items) {
+    if (line.ingredientId === ingredientId && UNITS[line.unit]?.base === 'pcs') {
+      const q = num(line.qty);
+      line.qty = Number.isFinite(q) ? +(q * UNITS[line.unit].factor * each).toFixed(3) : line.qty;
+      line.unit = unit;
+    }
+  }
+}
+
+// opts.openCalc: open the calculator straight away. opts.onDone(conversion): called when the pop-up closes.
+function ingredientModal(ing, opts = {}) {
   const isNew = !ing;
   ing = ing || { name: '', buyPrice: '', packSize: '', unit: 'g' };
   const used = isNew ? [] : menusUsing(ing.id);
-  const lockBase = used.length ? UNITS[ing.unit].base : null;
+  const oldBase = UNITS[ing.unit]?.base;
+  let lockBase = used.length ? oldBase : null;
+  let conversion = null; // { each, unit } once "Use this" switches a by-the-piece ingredient to weight/volume
+  let saved = false;
+  const calc = { open: !!opts.openCalc, count: '1', each: '', unit: oldBase === 'g' ? 'g' : 'ml', applied: '' };
+
+  const calcHTML = () => {
+    if (!calc.open) return `<button type="button" class="calc-toggle" data-calc="open">🧮 Work out pack size</button>`;
+    const count = num(calc.count), each = num(calc.each);
+    const total = count * each;
+    const ok = count > 0 && each > 0;
+    const newBase = UNITS[calc.unit].base;
+    const price = num($('#ing-form [name=buyPrice]')?.value ?? ing.buyPrice);
+    const perUnit = ok && price >= 0 ? price / total : NaN;
+    let notice = '';
+    if (used.length && oldBase !== 'pcs' && newBase !== oldBase) {
+      notice = `<div class="notice bad">${esc(ing.name)} is used in menus in ${oldBase === 'g' ? 'weight (g)' : 'volume (ml)'}. Choose a ${oldBase === 'g' ? 'weight' : 'volume'} unit for the size.</div>`;
+    } else if (used.length && oldBase === 'pcs') {
+      const names = used.map(m => m.name);
+      notice = `<div class="notice warn">⚠️ <b>${used.length} menu${used.length === 1 ? '' : 's'}</b> ${used.length === 1 ? 'uses' : 'use'} ${esc(ing.name)} in pcs (${esc(names.slice(0, 3).join(', '))}${names.length > 3 ? '…' : ''}).
+        They'll switch to ${esc(calc.unit)} when you save: <b>1 pcs → ${ok ? fmtNum(each) : '?'} ${esc(calc.unit)}</b>. Their cost stays the same; then change the amount to what you really use.</div>`;
+    }
+    const blocked = notice.includes('notice bad');
+    return `<div class="calc">
+      <div class="calc-title">🧮 Work out pack size <button type="button" data-calc="close" aria-label="Close calculator">✕</button></div>
+      <div class="calc-grid">
+        <label class="field"><span>How many did you buy?</span><input type="number" data-calc-field="count" value="${esc(calc.count)}" min="0" step="any"></label>
+        <span class="calc-times" aria-hidden="true">×</span>
+        <label class="field"><span>Size of each</span><input type="number" data-calc-field="each" value="${esc(calc.each)}" min="0" step="any" placeholder="e.g. 250" class="${calc.each !== '' && !(each > 0) ? 'error' : ''}"></label>
+        <label class="field calc-unit"><span>Unit</span><select data-calc-field="unit">${SIZE_UNITS.map(u => `<option value="${u}" ${u === calc.unit ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
+      </div>
+      ${notice}
+      ${calc.applied ? `<div class="notice ok">✓ ${esc(calc.applied)}</div>` : ''}
+      ${ok ? `<div class="calc-result"><div class="calc-sum">${fmtNum(count)} × ${fmtNum(each)} ${esc(calc.unit)} = ${fmtNum(total)} ${esc(calc.unit)}
+          ${Number.isFinite(perUnit) ? `<small>${money(price)} ÷ ${fmtNum(total)} ${esc(calc.unit)} = ${money(perUnit, 4)} per ${esc(calc.unit)}</small>` : ''}</div>
+          <button type="button" class="btn primary small" data-calc="use" ${blocked ? 'disabled' : ''}>Use this</button></div>`
+        : '<div class="calc-result empty">Enter how many and the size of each to see the pack size.</div>'}
+    </div>`;
+  };
+
   openModal({
     title: isNew ? 'Add ingredient' : 'Edit ingredient',
+    onClose: () => opts.onDone?.(saved ? conversion : null),
     body: `<form id="ing-form">
       <label class="field"><span>Name</span><input type="text" name="name" value="${esc(ing.name)}" maxlength="80" required></label>
       <div class="row">
@@ -1243,6 +1303,7 @@ function ingredientModal(ing) {
         <label class="field"><span>Pack size</span><input type="number" name="packSize" value="${esc(ing.packSize)}" min="0" step="any" required></label>
         <label class="field"><span>Unit</span><select name="unit">${unitOptions(ing.unit, lockBase)}</select></label>
       </div>
+      <div id="calc-slot"></div>
       <p class="hint">Example: a 2 l bottle of milk for 95 → price 95, pack size 2, unit l.</p>
       <p class="muted" id="ing-preview"></p>
       ${used.length ? `<p class="muted" style="font-size:.85rem">Used in: ${used.map(m => esc(m.name)).join(', ')}</p>` : ''}
@@ -1264,25 +1325,76 @@ function ingredientModal(ing) {
         if (state.data.ingredients.some(i => i.id !== ing.id && i.name.toLowerCase() === name.toLowerCase())) {
           $('#ing-error').textContent = 'An ingredient with this name already exists.'; return true;
         }
+        const newBase = UNITS[v.unit].base;
+        const convert = used.length && newBase !== oldBase ? conversion : null;
+        if (used.length && newBase !== oldBase && !(convert && UNITS[convert.unit].base === newBase)) {
+          $('#ing-error').textContent = 'This ingredient is used in menus, so its unit type can only change with the calculator.'; return true;
+        }
         mutate(d => {
           if (isNew) d.ingredients.push({ id: uid('ing'), name, buyPrice, packSize, unit: v.unit });
           else {
             const target = d.ingredients.find(i => i.id === ing.id);
             Object.assign(target, { name, buyPrice, packSize, unit: v.unit });
             delete target.example;
+            if (convert) for (const m of d.menus) convertPieceLines(m.items, ing.id, convert.each, convert.unit);
           }
         });
+        saved = true;
+        conversion = convert;
+        if (convert) toast(`${used.length} menu${used.length === 1 ? '' : 's'} switched to ${convert.unit}`, 'ok');
       } },
     ],
     onOpen: modal => {
       const f = $('#ing-form', modal);
+      const slot = $('#calc-slot', modal);
       const update = () => {
         const v = Object.fromEntries(new FormData(f));
         const c = num(v.buyPrice) / num(v.packSize);
         $('#ing-preview', modal).textContent = Number.isFinite(c) && num(v.packSize) > 0 ? `= ${money(c, 4)} per ${v.unit}` : '';
       };
-      f.addEventListener('input', update);
+      const drawCalc = () => { slot.innerHTML = calcHTML(); };
+      // Redraw the result without losing focus in the box being typed in.
+      const refreshCalc = () => {
+        const active = document.activeElement?.dataset?.calcField;
+        const pos = document.activeElement?.selectionStart;
+        drawCalc();
+        if (active) {
+          const el = $(`[data-calc-field="${active}"]`, slot);
+          el.focus();
+          try { if (pos != null) el.setSelectionRange(pos, pos); } catch { /* number inputs have no selection */ }
+        }
+      };
+      f.addEventListener('input', e => {
+        const field = e.target.dataset.calcField;
+        if (field) { calc[field] = e.target.value; calc.applied = ''; refreshCalc(); return; }
+        update();
+        if (calc.open && e.target.name === 'buyPrice') refreshCalc();
+      });
+      slot.addEventListener('click', e => {
+        const act = e.target.closest('[data-calc]')?.dataset.calc;
+        if (act === 'open') { calc.open = true; drawCalc(); $('[data-calc-field="each"]', slot)?.focus(); }
+        else if (act === 'close') { calc.open = false; drawCalc(); }
+        else if (act === 'use') {
+          const count = num(calc.count), each = num(calc.each);
+          if (!(count > 0 && each > 0)) return;
+          const total = +(count * each).toFixed(3);
+          const newBase = UNITS[calc.unit].base;
+          if (used.length) {
+            lockBase = newBase;
+            conversion = oldBase === 'pcs' ? { each, unit: calc.unit } : null;
+          }
+          const unitSel = f.unit;
+          unitSel.innerHTML = unitOptions(calc.unit, lockBase);
+          unitSel.value = calc.unit;
+          f.packSize.value = total;
+          const price = num(f.buyPrice.value);
+          calc.applied = `Pack size set to ${fmtNum(total)} ${calc.unit}${price >= 0 ? ` · ${money(price / total, 4)} per ${calc.unit}` : ''}`;
+          update();
+          drawCalc();
+        }
+      });
       f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
+      drawCalc();
       update();
     },
   });
@@ -1326,7 +1438,8 @@ function extraModal(ex) {
   });
 }
 
-function menuModal(menu) {
+// draftIn: reopen with unsaved edits (e.g. after fixing an ingredient's size from a menu line).
+function menuModal(menu, draftIn = null) {
   const d = state.data;
   if (!d.ingredients.length) {
     confirmModal('Add ingredients first', 'A menu is built from your ingredients. Add some ingredients first.', 'Go to ingredients', () => setTab('ingredients'));
@@ -1334,7 +1447,7 @@ function menuModal(menu) {
   }
   const isNew = !menu;
   // Edit a copy so Cancel throws changes away.
-  const draft = structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [], steps: [] });
+  const draft = draftIn || structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [], steps: [] });
   draft.excludedExtras = draft.excludedExtras || [];
   draft.steps = draft.steps || [];
   // Upload progress per step, kept out of the saved data.
@@ -1357,7 +1470,8 @@ function menuModal(menu) {
       <td class="unit"><select data-field="unit">${unitOptions(line.unit, base)}</select></td>
       <td class="num line-cost">${money(recipeLineCost(line))}</td>
       <td class="rm"><button class="btn link" type="button" data-remove="${idx}" aria-label="Remove">✕</button></td>
-    </tr>`;
+    </tr>${base === 'pcs' ? `<tr class="line-hint"><td colspan="5">${esc(ing.name)} is bought by the piece.
+      <button type="button" class="btn link" data-set-size="${esc(ing.id)}">Set its size</button> to use ml or g.</td></tr>` : ''}`;
   };
 
   const stepRow = (step, idx) => {
@@ -1485,7 +1599,7 @@ function menuModal(menu) {
       const drawLines = () => { linesEl.innerHTML = draft.items.map(lineRow).join(''); };
       const drawSummary = () => {
         $('#summary', modal).innerHTML = summaryHTML();
-        $$('#lines tr', modal).forEach(tr => {
+        $$('#lines tr[data-idx]', modal).forEach(tr => {
           $('.line-cost', tr).textContent = money(recipeLineCost(draft.items[+tr.dataset.idx]));
         });
       };
@@ -1514,6 +1628,18 @@ function menuModal(menu) {
       f.addEventListener('change', e => { if (e.target.dataset.extra) { readForm(); drawSummary(); } });
       f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
       linesEl.addEventListener('click', e => {
+        const sizeBtn = e.target.closest('[data-set-size]');
+        if (sizeBtn) {
+          // Fix the ingredient's size, then come back to this menu with the edits kept.
+          if (uploading()) { $('#menu-error').textContent = 'Wait for the photos to finish uploading.'; return; }
+          readForm();
+          const id = sizeBtn.dataset.setSize;
+          ingredientModal(findIngredient(id), { openCalc: true, onDone: conv => {
+            if (conv) convertPieceLines(draft.items, id, conv.each, conv.unit);
+            menuModal(menu, draft);
+          } });
+          return;
+        }
         const btn = e.target.closest('[data-remove]');
         if (!btn) return;
         draft.items.splice(+btn.dataset.remove, 1);
