@@ -68,10 +68,12 @@ function lsGet(key) {
 function lsSet(key, value) {
   try { localStorage.setItem(key, value); } catch { /* storage unavailable */ }
 }
-function toast(msg) {
+// kind: '' (plain), 'ok' (green tick) or 'bad' (red warning)
+function toast(msg, kind = '') {
   const el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = msg;
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.setAttribute('role', 'status');
+  el.textContent = (kind === 'ok' ? '✓ ' : kind === 'bad' ? '⚠️ ' : '') + msg;
   document.body.appendChild(el);
   setTimeout(() => el.remove(), 2600);
 }
@@ -106,6 +108,7 @@ function normalizeShop(d) {
   d.extras = d.extras || [];
   d.currency = CURRENCIES[d.currency] ? d.currency : 'THB';
   if (!Number.isFinite(d.targetCostPct)) d.targetCostPct = 35;
+  for (const m of d.menus) if (!Array.isArray(m.steps)) m.steps = [];
   tidyMenuExtras(d);
   return d;
 }
@@ -198,6 +201,25 @@ function statusPill(c) {
   if (c.status === 'none') return '<span class="muted">—</span>';
   const label = { ok: 'OK', warn: 'High', bad: 'Too high' }[c.status];
   return `<span class="pill ${c.status}">${pct(c.foodCostPct)} · ${label}</span>`;
+}
+
+// Food cost bar: fill = food cost %, line = target. The bar runs from 0 to twice the target.
+function costMeter(c) {
+  if (c.status === 'none') return '';
+  const target = state.data.targetCostPct / 100;
+  const scale = Math.min(target * 2, 1);
+  const fill = Math.max(0, Math.min(c.foodCostPct / scale, 1)) * 100;
+  const mark = Math.min(target / scale, 1) * 100;
+  return `<div class="meter ${c.status}" role="img" aria-label="Food cost ${pct(c.foodCostPct)}, target ${state.data.targetCostPct}%">
+    <i style="width:${fill.toFixed(1)}%"></i><span class="meter-target" style="left:${mark.toFixed(1)}%"></span></div>`;
+}
+
+// Same pastel colour every time for the same text, e.g. a category name.
+const CHIP_TINTS = ['lav', 'sky', 'peach', 'mint', 'butter', 'rose'];
+function chipTint(text) {
+  let h = 0;
+  for (const ch of String(text).toLowerCase()) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return 'tint-' + CHIP_TINTS[h % CHIP_TINTS.length];
 }
 
 /* ---------- example data ---------- */
@@ -376,6 +398,59 @@ function ingredientsCSV() {
   return toCSV([CSV_HEADER, ...rows]);
 }
 
+/* ---------- recipe cards (print / Save as PDF) ---------- */
+
+// Drops empty steps and trims text before saving or printing.
+function cleanSteps(steps) {
+  return (steps || [])
+    .map(s => ({ text: (s.text || '').trim(), ...(s.photo ? { photo: s.photo } : {}) }))
+    .filter(s => s.text || s.photo);
+}
+
+function recipeCardHTML(menu) {
+  const d = state.data;
+  const portions = menu.yield > 1 ? menu.yield : 1;
+  const lines = (menu.items || [])
+    .map(l => ({ ing: findIngredient(l.ingredientId), qty: num(l.qty), unit: l.unit }))
+    .filter(l => l.ing && l.qty > 0);
+  const steps = menu.steps || [];
+  return `<article class="recipe-card">
+    <div class="rc-shop">${esc(d.shopName)}</div>
+    <h1>${esc(menu.name)}</h1>
+    <div class="rc-meta">${menu.category ? esc(menu.category) + ' · ' : ''}Makes ${portions} ${portions === 1 ? 'portion' : 'portions'}</div>
+    <h2>Ingredients</h2>
+    ${lines.length ? `<table>${lines.map(l => `<tr><td>${esc(l.ing.name)}</td><td class="rc-amt">${fmtNum(l.qty)} ${esc(l.unit)}</td></tr>`).join('')}</table>`
+      : '<p class="rc-empty">No ingredients yet.</p>'}
+    <h2>How to make</h2>
+    ${steps.length ? `<ol>${steps.map(s => `<li>${esc(s.text)}${s.photo ? `<img src="${esc(photoSrc(s.photo))}" alt="">` : ''}</li>`).join('')}</ol>`
+      : '<p class="rc-empty">No steps yet.</p>'}
+  </article>`;
+}
+
+// Fills a print-only area with the cards, waits for photos, then opens the print screen ("Save as PDF").
+async function printRecipeCards(menus) {
+  if (!menus.length) { toast('No menus to print.'); return; }
+  let root = $('#print-root');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'print-root';
+    document.body.appendChild(root);
+  }
+  root.innerHTML = menus.map(recipeCardHTML).join('');
+  const imgs = $$('img', root);
+  if (imgs.length) {
+    toast('Preparing recipe cards…');
+    const loaded = Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
+    await Promise.race([loaded, new Promise(r => setTimeout(r, 15000))]);
+  }
+  // The page title becomes the suggested PDF file name.
+  const oldTitle = document.title;
+  document.title = menus.length === 1 ? `${menus[0].name} - recipe card` : `${state.data.shopName} - recipe cards`;
+  const done = () => { root.innerHTML = ''; document.title = oldTitle; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  window.print();
+}
+
 function menusCSV() {
   const rows = [...state.data.menus].sort(byName).map(m => {
     const c = calcMenu(m);
@@ -462,6 +537,70 @@ const ApiStore = {
 
 const store = ONLINE ? ApiStore : LocalStore;
 
+/* ---------- step photos ---------- */
+
+// Online: photos go to R2 through the Worker and a step keeps the key.
+// Test mode: no R2, so a smaller photo is kept in the step itself as a data: URL.
+const PHOTO_MAX_PX = ONLINE ? 1200 : 600;
+const PHOTO_QUALITY = ONLINE ? 0.8 : 0.7;
+
+function photoSrc(photo) {
+  if (!photo) return '';
+  return photo.startsWith('data:') ? photo : `/api/photos/${encodeURIComponent(photo)}`;
+}
+
+// Shrinks a photo from the phone or computer to a JPEG no wider/taller than PHOTO_MAX_PX.
+async function shrinkPhoto(file) {
+  let img;
+  try {
+    img = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      img = await new Promise((resolve, reject) => {
+        const el = new Image();
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('This file is not a photo the browser can open.'));
+        el.src = url;
+      });
+    } finally { URL.revokeObjectURL(url); }
+  }
+  const scale = Math.min(1, PHOTO_MAX_PX / Math.max(img.width, img.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  img.close?.();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob(b => b ? resolve(b) : reject(new Error('Could not read this photo.')), 'image/jpeg', PHOTO_QUALITY));
+}
+
+// Returns what to store in the step: an R2 key (online) or a data: URL (test mode).
+async function uploadStepPhoto(file) {
+  const blob = await shrinkPhoto(file);
+  if (!ONLINE) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error('Could not read this photo.'));
+      r.readAsDataURL(blob);
+    });
+  }
+  let res;
+  try {
+    res = await fetch('/api/photos', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob, credentials: 'same-origin' });
+  } catch {
+    throw new Error('Upload failed. Check your internet and try again.');
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* ignore */ }
+  if (!res.ok || !body?.key) throw new Error(body?.error || `Upload failed (${res.status}). Try again.`);
+  return body.key;
+}
+
 /* ---------- app state & saving ---------- */
 
 const state = {
@@ -472,8 +611,9 @@ const state = {
   shopId: null,
   meta: null,         // { modifiedTime, by }
   data: null,
-  tab: lsGet('menucost_tab') || 'menus',
+  tab: lsGet('menucost_tab') || 'home',
   search: '',
+  category: '',       // menu category filter on the Menus tab ('' = all)
   saveState: 'saved', // saved | dirty | saving | error
   saveError: '',
 };
@@ -566,7 +706,7 @@ async function showShopsAndLastShop() {
 // Shows a toast, or the sign-in screen when the sign-in has expired.
 function showError(err) {
   if (err.auth) showLogin(err.message);
-  else toast(err.message);
+  else toast(err.message, 'bad');
 }
 
 async function refreshShops() {
@@ -574,7 +714,7 @@ async function refreshShops() {
     state.shops = await store.listShops();
   } catch (err) {
     if (err.auth) { showLogin(); return; }
-    toast(err.message);
+    toast(err.message, 'bad');
   }
   render();
 }
@@ -647,6 +787,7 @@ async function openShop(id) {
     state.saveState = 'saved';
     state.screen = 'app';
     state.search = '';
+    state.category = '';
     lsSet('menucost_last_shop', id);
     render();
   } catch (err) {
@@ -670,7 +811,7 @@ function showFatal(html) {
 
 function render() {
   const app = $('#app');
-  if (state.screen === 'loading') app.innerHTML = '<div class="center-page muted">Loading…</div>';
+  if (state.screen === 'loading') app.innerHTML = '<div class="center-page"><div class="loading"><span class="hero-logo">☕</span><p class="muted">Loading…</p></div></div>';
   else if (state.screen === 'login') app.innerHTML = renderLogin();
   else if (state.screen === 'shops') app.innerHTML = renderShops();
   else app.innerHTML = renderApp();
@@ -680,8 +821,9 @@ function render() {
 function renderLogin() {
   const bad = state.loginError && !state.loginLocked;
   return `<div class="center-page"><div class="card pad center-card">
-    <h1>Menu Cost</h1>
-    <p class="muted" style="margin:0">Enter the family password.</p>
+    <div class="hero"><span class="hero-logo">☕</span>
+      <h1>Menu Cost</h1>
+      <p class="muted">Know what every menu really costs. Enter the family password to start.</p></div>
     <form id="login-form">
       <label class="field"><span>Password</span>
         <input type="password" name="password" id="login-password" autocomplete="current-password" required
@@ -702,13 +844,14 @@ function renderShops() {
   const list = state.shops.length
     ? `<ul class="shop-list">${state.shops.map(s => `
         <li data-action="open-shop" data-id="${esc(s.id)}">
+          <span class="shop-avatar ${chipTint(s.name)}">${esc([...s.name.trim()][0] || '☕')}</span>
           <div class="grow"><b>${esc(s.name)}</b>
             <div class="muted" style="font-size:.82rem">Last change ${esc(fmtTime(s.modifiedTime))}</div></div>
           <span class="muted">›</span>
         </li>`).join('')}</ul>`
     : `<p class="muted">No shops yet. Create your first one below.</p>`;
   return `<div class="center-page"><div class="card pad center-card">
-    <h1>Choose a shop</h1>
+    <div class="hero"><span class="hero-logo">☕</span><h1>Choose a shop</h1></div>
     ${ONLINE ? signedInLine() : '<p class="muted" style="margin:0">Test mode: data is saved in this browser only.</p>'}
     ${list}
     <hr class="divider">
@@ -725,42 +868,63 @@ function renderShops() {
 
 function renderSaveStatusText() {
   switch (state.saveState) {
-    case 'saving': return 'Saving…';
-    case 'dirty': return 'Unsaved changes';
-    case 'error': return `Not saved — <button class="btn link" data-action="retry-save">retry</button>`;
+    case 'saving': return '<span class="save-text">Saving…</span>';
+    case 'dirty': return '<span class="save-text">Unsaved changes</span>';
+    case 'error': return '<span class="save-text">Not saved</span>';
     default: {
       const who = state.meta?.by ? ` by ${esc(state.meta.by)}` : '';
-      return `Saved ✓<span class="wide-only">${who} ${esc(fmtTime(state.meta?.modifiedTime))}</span>`;
+      return `<span class="save-text">Saved<span class="wide-only">${who} ${esc(fmtTime(state.meta?.modifiedTime))}</span></span>`;
     }
   }
+}
+function renderSaveBanner() {
+  if (state.saveState !== 'error') return '';
+  return `<div class="save-banner" role="alert"><span>⚠️ Your changes are not saved yet. ${esc(state.saveError || 'Check your internet.')}</span>
+    <button class="btn small" data-action="retry-save">Retry</button></div>`;
 }
 function renderSaveStatus() {
   const el = $('.save-status');
   if (!el) return;
-  el.className = 'save-status' + (state.saveState === 'error' ? ' error' : '');
-  el.innerHTML = renderSaveStatusText();
+  el.className = `save-status ${state.saveState}`;
+  el.innerHTML = '<span class="dot" aria-hidden="true"></span>' + renderSaveStatusText();
   el.title = state.saveState === 'error' ? state.saveError : '';
+  const banner = $('#save-banner');
+  if (banner) banner.innerHTML = renderSaveBanner();
 }
 
-const TABS = [['menus', 'Menus'], ['ingredients', 'Ingredients'], ['extras', 'Extra costs', 'Extras'], ['settings', 'Settings']];
+// [key, label, short label for phones, icon]
+const TABS = [
+  ['home', 'Home', 'Home', '🏠'],
+  ['menus', 'Menus', 'Menus', '🥤'],
+  ['ingredients', 'Ingredients', 'Ingredients', '🧺'],
+  ['extras', 'Extra costs', 'Extras', '💡'],
+  ['settings', 'Settings', 'Settings', '⚙️'],
+];
 
 function renderApp() {
-  const body = {
-    menus: renderMenus, ingredients: renderIngredients, extras: renderExtras, settings: renderSettings,
-  }[state.tab]?.() ?? renderMenus();
+  const renderers = {
+    home: renderHome, menus: renderMenus, ingredients: renderIngredients, extras: renderExtras, settings: renderSettings,
+  };
+  const body = (renderers[state.tab] || renderHome)();
+  const tab = renderers[state.tab] ? state.tab : 'home';
+  const tabButton = ([k, label, short, icon], cls) =>
+    `<button class="${cls} ${tab === k ? 'active' : ''}" data-action="tab" data-tab="${k}" ${tab === k ? 'aria-current="page"' : ''}>
+      <span class="tab-ico" aria-hidden="true">${icon}</span><span>${cls === 'tab' ? label : short}</span></button>`;
   return `
     <header class="topbar"><div class="wrap">
-      <span class="brand">☕<span class="wide-only"> Menu Cost</span></span>
-      <span class="shop-name" title="${esc(state.data.shopName)}">${esc(state.data.shopName)}</span>
-      <button class="btn small switch-btn" data-action="switch-shop">Switch<span class="wide-only"> shop</span></button>
-      <span class="spacer"></span>
-      <span class="save-status">${renderSaveStatusText()}</span>
-    </div>
-    <div class="wrap"><nav class="tabs">
-      ${TABS.map(([k, v, short]) => `<button class="tab ${state.tab === k ? 'active' : ''}" data-action="tab" data-tab="${k}">${short
-        ? `<span class="wide-only">${v}</span><span class="phone-only">${short}</span>` : v}</button>`).join('')}
-    </nav></div></header>
-    <main><div class="wrap">${body}</div></main>`;
+      <span class="logo" aria-hidden="true">☕</span>
+      <div class="shop-block">
+        <span class="shop-name" title="${esc(state.data.shopName)}">${esc(state.data.shopName)}</span>
+        <button class="btn link switch-btn" data-action="switch-shop">Switch shop</button>
+      </div>
+      <nav class="tabs wide-only" aria-label="Sections">${TABS.map(t => tabButton(t, 'tab')).join('')}</nav>
+      <span class="save-status ${state.saveState}" title="${state.saveState === 'error' ? esc(state.saveError) : ''}"><span class="dot" aria-hidden="true"></span>${renderSaveStatusText()}</span>
+    </div></header>
+    <main><div class="wrap">
+      <div id="save-banner">${renderSaveBanner()}</div>
+      ${body}
+    </div></main>
+    <nav class="bottom-nav phone-only" aria-label="Sections">${TABS.map(t => tabButton(t, 'bnav')).join('')}</nav>`;
 }
 
 function matches(text) {
@@ -771,60 +935,139 @@ function searchBox(placeholder) {
   return `<input type="search" id="search" placeholder="${esc(placeholder)}" value="${esc(state.search)}">`;
 }
 
-function exampleEmptyState(title, text, addAction, addLabel, extraButtons = '') {
+function exampleEmptyState(emoji, title, text, addAction, addLabel, extraButtons = '') {
   return `<div class="card empty">
+    <span class="empty-emoji" aria-hidden="true">${emoji}</span>
     <h3>${esc(title)}</h3>
     <p>${esc(text)}</p>
     <div class="toolbar">
       <button class="btn primary" data-action="${addAction}">${esc(addLabel)}</button>
-      <button class="btn" data-action="load-examples">Load example data</button>
+      <button class="btn" data-action="load-examples">Try with example data</button>
       ${extraButtons}
     </div>
   </div>`;
 }
 
+/* Home tab */
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? ['Good morning', '☀️'] : h < 18 ? ['Good afternoon', '🌤️'] : ['Good evening', '🌙'];
+}
+
+function renderHome() {
+  const d = state.data;
+  const [hello, sun] = greeting();
+  const head = `<div class="hello"><h1>${hello}, ${esc(d.shopName)} ${sun}</h1>`;
+
+  if (!d.menus.length) {
+    const steps = [
+      [d.ingredients.length > 0, 'Add ingredients', d.ingredients.length ? `${d.ingredients.length} added` : 'What you buy, its price and pack size', 'add-ingredient', '+ Ingredient'],
+      [false, 'Build your first menu', 'Pick ingredients and how much one plate uses', 'add-menu', '+ Menu'],
+      [d.extras.length > 0, 'Add extra costs', d.extras.length ? `${d.extras.length} added` : 'Wages, gas, rent. Optional', 'add-extra', '+ Extra cost'],
+    ];
+    return `${head}<p class="muted">Three small steps and you will see what every menu really costs.</p></div>
+      <ol class="onboard">${steps.map(([done, title, sub, action, label], i) => `
+        <li class="${done ? 'done' : ''}">
+          <span class="onboard-no" aria-hidden="true">${done ? '✓' : i + 1}</span>
+          <div class="grow"><b>${title}</b><small>${esc(sub)}</small></div>
+          ${done ? '<span class="pill ok">Done</span>' : `<button class="btn small ${i === steps.findIndex(s => !s[0]) ? 'primary' : ''}" data-action="${action}">${label}</button>`}
+        </li>`).join('')}</ol>
+      <div class="toolbar"><button class="btn" data-action="load-examples">Try with example data</button></div>`;
+  }
+
+  const all = d.menus.map(m => ({ m, c: calcMenu(m) }));
+  const priced = all.filter(x => x.c.status !== 'none');
+  const avg = priced.length ? priced.reduce((s, x) => s + x.c.foodCostPct, 0) / priced.length : NaN;
+  const attention = all
+    .filter(x => x.c.problems || x.c.status === 'warn' || x.c.status === 'bad')
+    .sort((a, b) => (b.c.foodCostPct || 0) - (a.c.foodCostPct || 0));
+  const high = priced.filter(x => x.c.status !== 'ok').length;
+  const best = all.filter(x => Number.isFinite(x.c.profit)).sort((a, b) => b.c.profit - a.c.profit).slice(0, 3);
+  const why = x => x.c.problems ? `${x.c.problems} ingredient line(s) incomplete`
+    : x.c.status === 'bad' ? 'Food cost well above target' : 'A little above target';
+
+  return `${head}<p class="muted">${d.menus.length} menu${d.menus.length === 1 ? '' : 's'}${high ? `, ${high} above your ${d.targetCostPct}% food cost target.` : '. All within your food cost target 🎉'}</p></div>
+    <div class="stats">
+      <div class="stat tint-lav"><span class="stat-ico" aria-hidden="true">🥤</span><div class="label">Menus</div><div class="value">${d.menus.length}</div></div>
+      <div class="stat tint-sky"><span class="stat-ico" aria-hidden="true">📊</span><div class="label">Average food cost</div><div class="value">${pct(avg)}</div></div>
+      <div class="stat tint-peach"><span class="stat-ico" aria-hidden="true">🎯</span><div class="label">Target food cost</div><div class="value">${d.targetCostPct}%</div></div>
+      <div class="stat ${high ? 'tint-rose' : 'tint-mint'}"><span class="stat-ico" aria-hidden="true">${high ? '⚠️' : '✅'}</span><div class="label">Above target</div><div class="value">${high}</div></div>
+    </div>
+    <div class="home-grid">
+      <section class="card pad">
+        <h2>👀 Needs attention</h2>
+        ${attention.length ? `<ul class="list">${attention.slice(0, 5).map(x => `
+          <li data-action="edit-menu" data-id="${esc(x.m.id)}"><div class="grow"><b>${esc(x.m.name)}</b><small>${why(x)}</small></div>
+            ${x.c.problems ? '<span class="pill bad">Check</span>' : statusPill(x.c)}</li>`).join('')}</ul>
+          ${attention.length > 5 ? `<button class="btn link" data-action="tab" data-tab="menus">See all ${attention.length} on Menus ›</button>` : ''}`
+          : '<p class="muted list-empty">Nothing to fix. Every menu is within target 🎉</p>'}
+      </section>
+      <section class="card pad">
+        <h2>🏆 Best earners per plate</h2>
+        ${best.length ? `<ul class="list">${best.map((x, i) => `
+          <li data-action="edit-menu" data-id="${esc(x.m.id)}"><span class="rank" aria-label="Number ${i + 1}">${i + 1}</span>
+            <div class="grow"><b>${esc(x.m.name)}</b><small>${pct(x.c.profitPct)} profit</small></div>
+            <b class="money ${x.c.profit < 0 ? 'neg' : ''}">${money(x.c.profit)}</b></li>`).join('')}</ul>`
+          : '<p class="muted list-empty">Add sell prices to see profit.</p>'}
+      </section>
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" data-action="add-menu">+ Add menu</button>
+      <button class="btn" data-action="add-ingredient">+ Add ingredient</button>
+      <button class="btn" data-action="print-all-cards">📄 All recipe cards</button>
+    </div>`;
+}
+
 /* Menus tab */
+
+function menuCard(m) {
+  const c = calcMenu(m);
+  return `<button class="menu-card" data-action="edit-menu" data-id="${esc(m.id)}">
+    <div class="mc-top">
+      <b class="mc-name">${esc(m.name)}</b>
+      <div class="mc-tags">${m.category ? `<span class="chip ${chipTint(m.category)}">${esc(m.category)}</span>` : ''}${m.example ? '<span class="chip">example</span>' : ''}${c.problems ? '<span class="pill bad">Check</span>' : ''}</div>
+    </div>
+    <div class="mc-meter">${costMeter(c)}${statusPill(c)}</div>
+    <div class="mc-nums">
+      <div><span>Sell</span><b>${money(num(m.sellPrice))}</b></div>
+      <div><span>Cost</span><b>${money(c.ingredientCost)}</b></div>
+      <div class="mc-profit ${c.profit < 0 ? 'neg' : ''}"><span>Profit</span><b>${money(c.profit)}</b></div>
+    </div>
+    ${c.extrasCost ? `<div class="mc-foot muted">+ ${money(c.extrasCost)} extras · break-even ${money(c.breakEvenPrice)}</div>` : `<div class="mc-foot muted">Break-even ${money(c.breakEvenPrice)}</div>`}
+  </button>`;
+}
 
 function renderMenus() {
   const d = state.data;
   if (!d.menus.length) {
     if (!d.ingredients.length) {
-      return exampleEmptyState('No menus yet', 'Start by adding your ingredients, then build each menu from them. Or load example data to try it first.', 'go-ingredients', 'Add ingredients first');
+      return exampleEmptyState('🧺', 'No menus yet', 'Start by adding your ingredients, then build each menu from them. Or try it first with example data.', 'go-ingredients', 'Add ingredients first');
     }
-    return exampleEmptyState('No menus yet', 'Add your first menu item and choose how much of each ingredient one plate uses.', 'add-menu', '+ Add menu');
+    return exampleEmptyState('🥤', 'No menus yet', 'Add your first menu item and choose how much of each ingredient one plate uses.', 'add-menu', '+ Add menu');
   }
-  const menus = [...d.menus].sort(byName).filter(m => matches(m.name + ' ' + (m.category || '')));
-  const calcs = d.menus.map(calcMenu).filter(c => c.status !== 'none');
-  const avg = calcs.length ? calcs.reduce((s, c) => s + c.foodCostPct, 0) / calcs.length : NaN;
-  const high = calcs.filter(c => c.status !== 'ok').length;
+  const counts = {};
+  for (const m of d.menus) if (m.category) counts[m.category] = (counts[m.category] || 0) + 1;
+  const cats = Object.keys(counts).sort((a, b) => a.localeCompare(b));
+  const cat = cats.includes(state.category) ? state.category : '';
+  const menus = [...d.menus].sort(byName)
+    .filter(m => !cat || m.category === cat)
+    .filter(m => matches(m.name + ' ' + (m.category || '')));
   return `
-    <div class="stats">
-      <div class="card stat"><div class="label">Menus</div><div class="value">${d.menus.length}</div></div>
-      <div class="card stat"><div class="label">Average food cost</div><div class="value">${pct(avg)}</div></div>
-      <div class="card stat"><div class="label">Target food cost</div><div class="value">${d.targetCostPct}%</div></div>
-      <div class="card stat"><div class="label">Above target</div><div class="value" style="color:${high ? 'var(--bad)' : 'var(--ok)'}">${high}</div></div>
-    </div>
     <div class="toolbar">
       ${searchBox('Search menus…')}
       <button class="btn primary" data-action="add-menu">+ Add menu</button>
-      <button class="btn" data-action="export-menus">Export CSV</button>
+      <button class="btn wide-only" data-action="export-menus">Export CSV</button>
+      <button class="btn wide-only" data-action="print-all-cards">📄 Recipe cards</button>
+      <button class="btn phone-only" data-action="menus-more">More ▾</button>
     </div>
-    <div class="card table-wrap"><table class="rtable menus-table">
-      <thead><tr><th>Menu</th><th class="num">Cost / plate</th><th class="num">Extras</th><th class="num">Sell price</th><th>Food cost</th><th class="num">Profit / plate</th><th class="num">Break-even</th></tr></thead>
-      <tbody>${menus.map(m => {
-        const c = calcMenu(m);
-        return `<tr class="clickable" data-action="edit-menu" data-id="${esc(m.id)}">
-          <td class="c-name"><b>${esc(m.name)}</b>${m.category ? `<span class="tag">${esc(m.category)}</span>` : ''}${m.example ? '<span class="tag">example</span>' : ''}${c.problems ? '<span class="pill bad check-pill">check</span>' : ''}</td>
-          <td class="num c-cost" data-label="Cost">${money(c.ingredientCost)}</td>
-          <td class="num muted c-extras" data-label="Extras">${c.extrasCost ? money(c.extrasCost) : '—'}</td>
-          <td class="num c-sell" data-label="Sell">${money(num(m.sellPrice))}</td>
-          <td class="c-pill">${statusPill(c)}</td>
-          <td class="num c-profit" data-label="Profit" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}${Number.isFinite(c.profitPct) ? `<span class="profit-pct">${pct(c.profitPct)}</span>` : ''}</td>
-          <td class="num muted c-breakeven" data-label="Break-even">${money(c.breakEvenPrice)}</td>
-        </tr>`;
-      }).join('') || `<tr><td colspan="7" class="muted no-match">No menus match "${esc(state.search)}".</td></tr>`}</tbody>
-    </table></div>
-    <p class="muted" style="font-size:.85rem">Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Break-even = lowest price that covers ingredients and all extra costs. Profit % = what is left of the sell price.</p>`;
+    ${cats.length ? `<div class="filters" role="group" aria-label="Filter by category">
+      <button class="filter ${cat ? '' : 'on'}" data-action="category" data-cat="" aria-pressed="${!cat}">All · ${d.menus.length}</button>
+      ${cats.map(k => `<button class="filter ${cat === k ? 'on' : ''}" data-action="category" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(k)} · ${counts[k]}</button>`).join('')}
+    </div>` : ''}
+    ${menus.length ? `<div class="menu-grid">${menus.map(menuCard).join('')}</div>`
+      : `<div class="card empty"><span class="empty-emoji" aria-hidden="true">🔍</span><p>No menus match${state.search ? ` "${esc(state.search)}"` : ''}${cat ? ` in ${esc(cat)}` : ''}.</p></div>`}
+    <p class="footnote muted">The bar shows food cost; the dark line is your ${d.targetCostPct}% target. Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Break-even = lowest price that covers ingredients and all extra costs.</p>`;
 }
 
 /* Ingredients tab */
@@ -835,7 +1078,7 @@ function renderIngredients() {
       <button class="btn wide-only" data-action="import-csv">Import CSV</button>
       <button class="btn wide-only" data-action="template-csv">Download CSV template</button>`;
   if (!d.ingredients.length) {
-    return exampleEmptyState('No ingredients yet', 'Add what you buy: the price you pay and the pack size. You can also import a CSV file from Excel or Google Sheets.', 'add-ingredient', '+ Add ingredient', tools);
+    return exampleEmptyState('🧺', 'No ingredients yet', 'Add what you buy: the price you pay and the pack size. You can also import a CSV file from Excel or Google Sheets.', 'add-ingredient', '+ Add ingredient', tools);
   }
   const list = [...d.ingredients].sort(byName).filter(i => matches(i.name));
   return `
@@ -851,9 +1094,9 @@ function renderIngredients() {
       <tbody>${list.map(i => {
         const used = menusUsing(i.id).length;
         return `<tr class="clickable" data-action="edit-ingredient" data-id="${esc(i.id)}">
-          <td class="c-name"><b>${esc(i.name)}</b>${i.example ? '<span class="tag">example</span>' : ''}</td>
+          <td class="c-name"><b>${esc(i.name)}</b>${i.example ? '<span class="chip">example</span>' : ''}</td>
           <td class="num c-buy" data-label="Buy price">${money(i.buyPrice)}</td>
-          <td class="num c-pack" data-label="Pack">${fmtNum(i.packSize)} ${esc(i.unit)}</td>
+          <td class="num c-pack" data-label="Pack"><span class="unit-pill">${fmtNum(i.packSize)} ${esc(i.unit)}</span></td>
           <td class="num c-unit" data-label="Per unit">${money(costPerPackUnit(i), 4)} / ${esc(i.unit)}</td>
           <td class="num muted c-used">${used ? `<span class="phone-only">Used in </span>${used}${used === 1 ? ' menu' : ' menus'}` : '<span class="wide-only">—</span><span class="phone-only">Not used yet</span>'}</td>
         </tr>`;
@@ -865,10 +1108,10 @@ function renderIngredients() {
 
 function renderExtras() {
   const d = state.data;
-  const intro = `<p class="muted">Extra costs like staff wages, gas, electric or rent. They are added to every menu (untick one in a menu's editor to leave it out of that menu).
+  const intro = `<p class="muted intro">Extra costs like staff wages, gas, electric or rent. They are added to every menu (untick one in a menu's editor to leave it out of that menu).
     Use <b>% of sell price</b> for costs that grow with sales, or <b>fixed per plate</b> for a set amount.</p>`;
   if (!d.extras.length) {
-    return intro + `<div class="card empty"><h3>No extra costs yet</h3><p>Without extras, profit only takes away ingredients and packaging.</p>
+    return intro + `<div class="card empty"><span class="empty-emoji" aria-hidden="true">💡</span><h3>No extra costs yet</h3><p>Without extras, profit only takes away ingredients and packaging.</p>
       <div class="toolbar"><button class="btn primary" data-action="add-extra">+ Add extra cost</button></div></div>`;
   }
   return intro + `
@@ -878,8 +1121,8 @@ function renderExtras() {
       <tbody>${d.extras.map(e => {
         const used = d.menus.filter(m => menuUsesExtra(m, e.id)).length;
         return `<tr class="clickable" data-action="edit-extra" data-id="${esc(e.id)}">
-        <td class="c-name"><b>${esc(e.name)}</b>${e.example ? '<span class="tag">example</span>' : ''}</td>
-        <td class="c-type">${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</td>
+        <td class="c-name"><b>${esc(e.name)}</b>${e.example ? '<span class="chip">example</span>' : ''}</td>
+        <td class="c-type"><span class="chip ${e.type === 'percent' ? 'tint-lav' : 'tint-sky'}">${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</span></td>
         <td class="num c-amount">${e.type === 'percent' ? fmtNum(e.value) + '%' : money(e.value)}</td>
         <td class="num muted c-used">${used ? `${used} of ${d.menus.length} menus` : 'Not used'}</td>
       </tr>`;
@@ -891,30 +1134,35 @@ function renderExtras() {
 
 function renderSettings() {
   const d = state.data;
-  return `<div class="card pad" style="max-width:560px">
-    <form id="settings-form">
-      <label class="field"><span>Shop name</span><input type="text" name="shopName" value="${esc(d.shopName)}" maxlength="80" required></label>
-      <label class="field"><span>Currency</span><select name="currency">
-        ${Object.entries(CURRENCIES).map(([k, v]) => `<option value="${k}" ${d.currency === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}
-      </select></label>
-      <p class="hint">Changing currency only changes the symbol. Prices are not converted.</p>
-      <label class="field"><span>Target food cost %</span><input type="number" name="targetCostPct" value="${d.targetCostPct}" min="1" max="100" step="0.5" required></label>
-      <p class="hint">Cafés often aim for 25–35%. Menus above this show as “High”.</p>
-      <button class="btn primary" type="submit">Save settings</button>
-    </form>
-    <hr class="divider">
-    <h3 style="margin-bottom:8px">Example data</h3>
-    <div class="toolbar">
-      <button class="btn" data-action="load-examples">Load example data</button>
-      <button class="btn danger" data-action="clear-examples" ${hasExampleData() ? '' : 'disabled'}>Clear example data</button>
-    </div>
-    <hr class="divider">
-    <h3 style="margin-bottom:8px">Backup</h3>
-    <p class="muted" style="margin-top:0">${ONLINE
-      ? 'Saved automatically in your Cloudflare database. To let family use the app, send them the link and the family password.'
-      : 'Test mode: saved in this browser only. Download a backup file to keep a copy.'}</p>
-    <div class="toolbar"><button class="btn" data-action="download-backup">Download backup (.json)</button></div>
-    ${ONLINE ? `<hr class="divider">${signedInLine()}` : ''}
+  return `<div class="settings">
+    <section class="card pad">
+      <h2>🏪 Shop</h2>
+      <form id="settings-form">
+        <label class="field"><span>Shop name</span><input type="text" name="shopName" value="${esc(d.shopName)}" maxlength="80" required></label>
+        <label class="field"><span>Currency</span><select name="currency">
+          ${Object.entries(CURRENCIES).map(([k, v]) => `<option value="${k}" ${d.currency === k ? 'selected' : ''}>${esc(v)}</option>`).join('')}
+        </select></label>
+        <p class="hint">Changing currency only changes the symbol. Prices are not converted.</p>
+        <label class="field"><span>Target food cost %</span><input type="number" name="targetCostPct" value="${d.targetCostPct}" min="1" max="100" step="0.5" required></label>
+        <p class="hint">Cafés often aim for 25–35%. Menus above this show as “High”.</p>
+        <button class="btn primary" type="submit">Save settings</button>
+      </form>
+    </section>
+    <section class="card pad">
+      <h2>🧪 Example data</h2>
+      <div class="toolbar">
+        <button class="btn" data-action="load-examples">Load example data</button>
+        <button class="btn danger" data-action="clear-examples" ${hasExampleData() ? '' : 'disabled'}>Clear example data</button>
+      </div>
+    </section>
+    <section class="card pad">
+      <h2>💾 Backup</h2>
+      <p class="muted">${ONLINE
+        ? 'Saved automatically in your Cloudflare database. To let family use the app, send them the link and the family password.'
+        : 'Test mode: saved in this browser only. Download a backup file to keep a copy.'}</p>
+      <div class="toolbar"><button class="btn" data-action="download-backup">Download backup (.json)</button></div>
+      ${ONLINE ? `<hr class="divider">${signedInLine()}` : ''}
+    </section>
   </div>`;
 }
 
@@ -1070,8 +1318,12 @@ function menuModal(menu) {
   }
   const isNew = !menu;
   // Edit a copy so Cancel throws changes away.
-  const draft = structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [] });
+  const draft = structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [], steps: [] });
   draft.excludedExtras = draft.excludedExtras || [];
+  draft.steps = draft.steps || [];
+  // Upload progress per step, kept out of the saved data.
+  const stepState = new WeakMap();
+  const uploading = () => draft.steps.some(s => stepState.get(s)?.uploading);
   if (!draft.items.length) draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
   const ingredients = [...d.ingredients].sort(byName);
   const categories = [...new Set(d.menus.map(m => m.category).filter(Boolean))].sort();
@@ -1092,10 +1344,37 @@ function menuModal(menu) {
     </tr>`;
   };
 
+  const stepRow = (step, idx) => {
+    const st = stepState.get(step) || {};
+    const last = idx === draft.steps.length - 1;
+    let photo;
+    if (st.uploading) photo = '<div class="step-thumb loading">Uploading…</div>';
+    else if (step.photo) photo = `<div class="step-thumb"><button type="button" class="thumb-btn" data-step-act="photo" aria-label="Change photo"><img src="${esc(photoSrc(step.photo))}" alt="Step ${idx + 1} photo"></button>
+      <button type="button" class="thumb-x" data-step-act="rm-photo" aria-label="Remove photo">✕</button></div>`;
+    else photo = '<button type="button" class="btn small" data-step-act="photo">Add photo</button>';
+    return `<li class="step" data-step="${idx}">
+      <span class="step-no">${idx + 1}</span>
+      <textarea data-step-text rows="2" maxlength="500" placeholder="What to do in this step">${esc(step.text || '')}</textarea>
+      <div class="step-tools">
+        <button type="button" class="btn link" data-step-act="up" aria-label="Move step up" ${idx === 0 ? 'disabled' : ''}>↑</button>
+        <button type="button" class="btn link" data-step-act="down" aria-label="Move step down" ${last ? 'disabled' : ''}>↓</button>
+        <button type="button" class="btn link" data-step-act="del" aria-label="Delete step">✕</button>
+      </div>
+      <div class="step-photo">${photo}${st.error ? `<span class="error-text">${esc(st.error)}</span>` : ''}</div>
+    </li>`;
+  };
+
   const summaryHTML = () => {
     const c = calcMenu(draft);
     const portions = c.portions > 1 ? `<dt>Whole batch (${c.portions} portions)</dt><dd>${money(c.batchCost)}</dd>` : '';
-    return `<dl>
+    const neg = c.profit < 0 ? 'neg' : '';
+    return `<div class="sum-head">
+        <span class="sum-label">Profit per plate</span>
+        <span class="big-profit ${neg}">${money(c.profit)}</span>
+        ${Number.isFinite(c.profitPct) ? `<span class="pill ${c.profitPct < 0 ? 'bad' : 'ok'}">${pct(c.profitPct)} of price</span>` : ''}
+      </div>
+      ${c.status === 'none' ? '' : `<div>${costMeter(c)}<div class="meter-cap"><span>Food cost ${pct(c.foodCostPct)}</span><span>Target ${d.targetCostPct}%</span></div></div>`}
+      <dl>
       ${portions}
       <dt>Ingredients per plate</dt><dd>${money(c.ingredientCost)}</dd>
       ${c.extrasLines.map(l => `<dt>${esc(l.name)}${l.ex.type === 'percent' ? ` (${fmtNum(l.ex.value)}%)` : ''}</dt><dd>${money(l.amount)}</dd>`).join('')}
@@ -1103,8 +1382,6 @@ function menuModal(menu) {
       <hr>
       <dt>Sell price</dt><dd>${money(num(draft.sellPrice))}</dd>
       <dt>Food cost %</dt><dd>${statusPill(c)}</dd>
-      <dt class="total">Profit per plate</dt><dd class="total" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}</dd>
-      <dt class="total">Profit %</dt><dd class="total" style="${c.profitPct < 0 ? 'color:var(--bad)' : ''}">${pct(c.profitPct)}</dd>
       <dt>Break-even price (covers all costs)</dt><dd>${money(c.breakEvenPrice)}</dd>
     </dl>
     ${c.breakEvenOk ? '' : '<p class="error-text" style="margin:8px 0 0">Extra costs are 100% or more of the sell price, so no price can cover them. Lower the % extra costs.</p>'}
@@ -1114,7 +1391,8 @@ function menuModal(menu) {
   openModal({
     title: isNew ? 'Add menu' : 'Edit menu',
     wide: true,
-    body: `<form id="menu-form">
+    body: `<form id="menu-form" class="editor">
+      <div class="editor-main">
       <div class="row">
         <label class="field" style="flex:2"><span>Menu name</span><input type="text" name="name" value="${esc(draft.name)}" maxlength="80" required></label>
         <label class="field"><span>Category (optional)</span><input type="text" name="category" value="${esc(draft.category || '')}" list="cat-list" maxlength="40"></label>
@@ -1125,19 +1403,27 @@ function menuModal(menu) {
         <label class="field"><span>Recipe makes (portions)</span><input type="number" name="yield" value="${esc(draft.yield)}" min="1" step="1" required></label>
       </div>
       <p class="hint">Most drinks make 1. For a cake cut into 12 slices, enter the whole cake's ingredients and 12 portions.</p>
-      <h3 style="margin:6px 0 8px">Ingredients used</h3>
+      <h3 class="ed-h">🧺 Ingredients used</h3>
       <div class="table-wrap"><table class="recipe-table">
         <thead><tr><th>Ingredient</th><th>Amount</th><th>Unit</th><th class="num">Cost</th><th></th></tr></thead>
         <tbody id="lines"></tbody>
       </table></div>
       <button class="btn small" type="button" id="add-line" style="margin-top:8px">+ Add ingredient</button>
       ${d.extras.length ? `<div class="extras-pick">
-        <h3>Extra costs for this menu</h3>
+        <h3 class="ed-h">💡 Extra costs for this menu</h3>
         ${d.extras.map(e => `<label class="check"><input type="checkbox" data-extra="${esc(e.id)}" ${menuUsesExtra(draft, e.id) ? 'checked' : ''}> ${esc(e.name)}
           <span class="amt">${e.type === 'percent' ? fmtNum(e.value) + '% of price' : money(e.value) + ' per plate'}</span></label>`).join('')}
         <p class="hint">Untick a cost this menu does not use, e.g. no gas for a cold drink.</p>
       </div>` : ''}
-      <div class="summary" id="summary"></div>
+      <section class="editor-steps">
+        <h3 class="ed-h">👩‍🍳 How to make</h3>
+        <ol class="steps" id="steps"></ol>
+        <button class="btn small" type="button" id="add-step">+ Add step</button>
+        <p class="hint" style="margin-top:6px">One action per step. A photo is optional. Steps show on the recipe card.</p>
+      </section>
+      <input type="file" id="step-photo-input" accept="image/*" hidden>
+      </div>
+      <aside class="summary" id="summary" aria-live="polite"></aside>
       <p class="error-text" id="menu-error"></p>
     </form>`,
     buttons: [
@@ -1151,11 +1437,18 @@ function menuModal(menu) {
         mutate(dd => dd.menus.push(copy));
         setTimeout(() => menuModal(state.data.menus.find(m => m.id === copy.id)), 0);
       } }]),
+      { label: 'Recipe card (PDF)', onClick: () => {
+        readForm();
+        printRecipeCards([{ ...draft, name: draft.name.trim() || 'Untitled menu', steps: cleanSteps(draft.steps) }]);
+        return true;
+      } },
       { label: 'Cancel' },
       { label: 'Save', className: 'primary', onClick: () => {
         const f = $('#menu-form');
         if (!f.reportValidity()) return true;
+        if (uploading()) { $('#menu-error').textContent = 'Wait for the photos to finish uploading.'; return true; }
         readForm();
+        draft.steps = cleanSteps(draft.steps);
         draft.name = draft.name.trim();
         if (d.menus.some(m => m.id !== draft.id && m.name.toLowerCase() === draft.name.toLowerCase())) {
           $('#menu-error').textContent = 'A menu with this name already exists.'; return true;
@@ -1211,6 +1504,52 @@ function menuModal(menu) {
         if (!draft.items.length) draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
         drawLines(); drawSummary();
       });
+      // How to make: step list with optional photo per step.
+      const stepsEl = $('#steps', modal);
+      const fileInput = $('#step-photo-input', modal);
+      let photoTarget = null;
+      const drawSteps = () => { stepsEl.innerHTML = draft.steps.map(stepRow).join(''); };
+      stepsEl.addEventListener('input', e => {
+        if (!e.target.matches('[data-step-text]')) return;
+        e.stopPropagation(); // step text does not change costs
+        draft.steps[+e.target.closest('[data-step]').dataset.step].text = e.target.value;
+      });
+      stepsEl.addEventListener('click', e => {
+        const btn = e.target.closest('[data-step-act]');
+        if (!btn) return;
+        const i = +btn.closest('[data-step]').dataset.step;
+        const act = btn.dataset.stepAct;
+        const s = draft.steps;
+        if (act === 'up' && i > 0) [s[i - 1], s[i]] = [s[i], s[i - 1]];
+        else if (act === 'down' && i < s.length - 1) [s[i + 1], s[i]] = [s[i], s[i + 1]];
+        else if (act === 'del') s.splice(i, 1);
+        else if (act === 'rm-photo') delete s[i].photo;
+        else if (act === 'photo') { photoTarget = s[i]; fileInput.value = ''; fileInput.click(); return; }
+        drawSteps();
+      });
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files[0];
+        const step = photoTarget;
+        photoTarget = null;
+        if (!file || !step) return;
+        stepState.set(step, { uploading: true });
+        $('#menu-error', modal).textContent = '';
+        drawSteps();
+        try {
+          step.photo = await uploadStepPhoto(file);
+          stepState.delete(step);
+        } catch (err) {
+          stepState.set(step, { error: err.message });
+        }
+        if (stepsEl.isConnected) drawSteps();
+      });
+      $('#add-step', modal).onclick = () => {
+        draft.steps.push({ text: '' });
+        drawSteps();
+        $('#steps li:last-child textarea', modal).focus();
+      };
+      drawSteps();
+
       $('#add-line', modal).onclick = () => {
         draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
         drawLines(); drawSummary();
@@ -1234,7 +1573,7 @@ function importModal() {
         const plan = modal._plan;
         if (!plan || !(plan.adds.length + plan.updates.length)) return true;
         mutate(() => applyImport(plan));
-        toast(`Imported: ${plan.adds.length} new, ${plan.updates.length} updated`);
+        toast(`Imported: ${plan.adds.length} new, ${plan.updates.length} updated`, 'ok');
       } },
     ],
     onOpen: modal => {
@@ -1261,6 +1600,8 @@ function importModal() {
 function setTab(tab) {
   state.tab = tab;
   state.search = '';
+  state.category = '';
+  window.scrollTo(0, 0);
   lsSet('menucost_tab', tab);
   render();
 }
@@ -1270,6 +1611,17 @@ const ACTIONS = {
   'switch-shop': switchShop,
   'sign-out': signOut,
   'tab': el => setTab(el.dataset.tab),
+  'category': el => { state.category = el.dataset.cat; render(); },
+  'menus-more': () => openModal({
+    title: 'Menus',
+    body: `<div class="sheet-actions">
+      <button class="btn" data-sheet="print-all-cards">📄 All recipe cards (PDF)</button>
+      <button class="btn" data-sheet="export-menus">Export CSV</button>
+    </div>`,
+    onOpen: modal => $$('[data-sheet]', modal).forEach(b => {
+      b.onclick = () => { closeModal(); ACTIONS[b.dataset.sheet](); };
+    }),
+  }),
   'retry-save': () => { state.saveState = 'dirty'; saveNow(); },
   'go-ingredients': () => setTab('ingredients'),
   'add-menu': () => menuModal(null),
@@ -1293,13 +1645,14 @@ const ACTIONS = {
   'template-csv': () => download('ingredients-template.csv', templateCSV()),
   'export-ingredients': () => download(`${state.data.shopName} - ingredients.csv`, ingredientsCSV()),
   'export-menus': () => download(`${state.data.shopName} - menu costs.csv`, menusCSV()),
+  'print-all-cards': () => printRecipeCards([...state.data.menus].sort(byName)),
   'download-backup': () => download(`${state.data.shopName} - backup.json`, JSON.stringify(state.data, null, 2), 'application/json'),
   'load-examples': () => confirmModal('Load example data?',
     `Adds sample ${esc(state.data.currency)} ingredients, menus and extra costs, marked “example”. You can remove them any time in Settings → Clear example data.`,
-    'Load examples', () => { mutate(loadExampleData); toast('Example data loaded'); }),
+    'Load examples', () => { mutate(loadExampleData); toast('Example data loaded', 'ok'); }),
   'clear-examples': () => confirmModal('Clear example data?',
     'Removes all items marked “example”. Example ingredients still used by your own menus are kept.',
-    'Clear', () => { mutate(clearExampleData); toast('Example data cleared'); }),
+    'Clear', () => { mutate(clearExampleData); toast('Example data cleared', 'ok'); }),
 };
 
 function bind() {
@@ -1338,7 +1691,7 @@ function bind() {
       const name = v.name.trim();
       if (!name) return;
       if (state.shops.some(s => s.name.toLowerCase() === name.toLowerCase())) {
-        toast('A shop with this name already exists.'); return;
+        toast('A shop with this name already exists.', 'bad'); return;
       }
       $('button[type=submit]', newShop).disabled = true;
       try { await createShop(name, v.currency); }
@@ -1351,9 +1704,9 @@ function bind() {
       e.preventDefault();
       const v = Object.fromEntries(new FormData(settings));
       const target = num(v.targetCostPct);
-      if (!(target > 0 && target <= 100)) { toast('Target must be between 1 and 100.'); return; }
+      if (!(target > 0 && target <= 100)) { toast('Target must be between 1 and 100.', 'bad'); return; }
       mutate(d => { d.shopName = v.shopName.trim() || d.shopName; d.currency = v.currency; d.targetCostPct = target; });
-      toast('Settings saved');
+      toast('Settings saved', 'ok');
     };
   }
 }
