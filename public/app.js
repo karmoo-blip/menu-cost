@@ -1196,41 +1196,21 @@ function closeModal() {
   unlockPage();
 }
 
-/* iPhone: keep the page still and the pop-up inside the visible area while the keyboard is open,
-   so taps land on the field you see. */
+/* Phones show a pop-up as a normal full page (see style.css), so the iPhone keyboard
+   scrolls it natively and taps land on the field shown. Remember the list position. */
 let lockedY = null;
-function fitToViewport() {
-  const vv = window.visualViewport;
-  const bd = $('.modal-backdrop');
-  if (!vv || !bd) return;
-  bd.style.setProperty('--vv-h', vv.height + 'px');
-  bd.style.setProperty('--vv-top', vv.offsetTop + 'px');
-}
 function lockPage() {
-  if (lockedY === null) {
-    lockedY = window.scrollY;
-    document.body.style.top = `-${lockedY}px`; // pin the page where it was
-    document.body.classList.add('modal-open');
-    window.visualViewport?.addEventListener('resize', fitToViewport);
-    window.visualViewport?.addEventListener('scroll', fitToViewport);
-  }
-  fitToViewport();
+  if (lockedY !== null) return; // already open (e.g. Delete → confirm)
+  lockedY = window.scrollY;
+  document.body.classList.add('modal-open');
+  if (matchMedia('(max-width: 720px)').matches) window.scrollTo(0, 0); // phone: start at the top of the editor
 }
 function unlockPage() {
   if (lockedY === null) return;
   document.body.classList.remove('modal-open');
-  document.body.style.top = '';
   window.scrollTo(0, lockedY); // back to where you were in the list
   lockedY = null;
-  window.visualViewport?.removeEventListener('resize', fitToViewport);
-  window.visualViewport?.removeEventListener('scroll', fitToViewport);
 }
-// Keep the focused field in view above the keyboard
-document.addEventListener('focusin', e => {
-  if (e.target.closest?.('.modal') && e.target.matches('input, select, textarea')) {
-    setTimeout(() => { if (e.target.isConnected) e.target.scrollIntoView({ block: 'center' }); }, 300);
-  }
-});
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && $('#modal-root').innerHTML) closeModal();
 });
