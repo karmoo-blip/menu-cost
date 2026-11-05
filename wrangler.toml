@@ -15,4 +15,9 @@ binding = "DB"
 database_name = "menu-cost"
 database_id = "b7a459ac-ca5d-4f64-b468-3be5a8eedd20"
 
+# Step photos for recipe cards. Create once: `npx wrangler r2 bucket create menu-cost-photos`
+[[r2_buckets]]
+binding = "PHOTOS"
+bucket_name = "menu-cost-photos"
+
 # Sign-in password: set with `npx wrangler secret put APP_PASSWORD` (never put it in this file).

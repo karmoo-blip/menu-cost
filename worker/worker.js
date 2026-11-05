@@ -91,7 +91,49 @@ async function route(request, env, url) {
     return json({ id: m[1], modifiedTime: now, by });
   }
 
+  if (path === '/api/photos' && method === 'POST') return await uploadPhoto(request, env);
+  const p = path.match(/^\/api\/photos\/(p_[a-f0-9]{32}\.(?:jpg|png|webp))$/);
+  if (p && method === 'GET') return await getPhoto(env, p[1]);
+
   throw new HttpError(404, 'Not found');
+}
+
+/* ---------- step photos (R2) ---------- */
+
+const MAX_PHOTO_BYTES = 1024 * 1024;
+const PHOTO_TYPES = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+
+function photoBucket(env) {
+  if (!env.PHOTOS) throw new HttpError(503, 'Photo storage is not set up yet (R2 bucket menu-cost-photos).');
+  return env.PHOTOS;
+}
+
+// Body is the raw image (the app shrinks it first). Returns the key to store in the menu step.
+async function uploadPhoto(request, env) {
+  const bucket = photoBucket(env);
+  const type = (request.headers.get('Content-Type') || '').split(';')[0].trim();
+  const ext = PHOTO_TYPES[type];
+  if (!ext) throw new HttpError(415, 'Only JPEG, PNG or WebP photos can be uploaded.');
+  if (Number(request.headers.get('Content-Length') || 0) > MAX_PHOTO_BYTES) throw new HttpError(413, 'Photo is too big (max 1 MB).');
+  const bytes = await request.arrayBuffer();
+  if (!bytes.byteLength) throw new HttpError(400, 'Photo is empty.');
+  if (bytes.byteLength > MAX_PHOTO_BYTES) throw new HttpError(413, 'Photo is too big (max 1 MB).');
+  const key = `p_${crypto.randomUUID().replace(/-/g, '')}.${ext}`;
+  await bucket.put(key, bytes, { httpMetadata: { contentType: type } });
+  return json({ key });
+}
+
+async function getPhoto(env, key) {
+  const obj = await photoBucket(env).get(key);
+  if (!obj) throw new HttpError(404, 'Photo not found.');
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
+      // Keys are never reused, so the browser can keep a photo. "private": only this signed-in browser.
+      'Cache-Control': 'private, max-age=31536000, immutable',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
 }
 
 async function readBody(request) {

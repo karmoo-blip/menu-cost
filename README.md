@@ -7,6 +7,7 @@ A small web app for a restaurant or café to work out the cost, food cost % and 
 - Break-even price (lowest price that covers ingredients and all extra costs) and profit % left at your sell price.
 - Several shops, each with its own currency (THB or GBP).
 - CSV import/export for ingredients, CSV export for menu costs.
+- "How to make" steps with an optional photo per step, printed as recipe cards (print screen → Save as PDF).
 - Optional example data (only loaded when you press the button).
 
 It runs on **Cloudflare**: one Worker serves the page and an API, and the data is stored in a **D1** database
@@ -29,6 +30,7 @@ Needs Node.js. Run these in this folder.
 1. Log in: `npx wrangler login`
 2. Create the database: `npx wrangler d1 create menu-cost` and paste the `database_id` it prints into `wrangler.toml`.
 3. Create the tables: `npx wrangler d1 execute menu-cost --remote --file schema.sql`
+   Step photos: enable R2 in the Cloudflare dashboard, then `npx wrangler r2 bucket create menu-cost-photos`.
 4. Set the family password (you type it; it is never shown or saved in a file):
    `npx wrangler secret put APP_PASSWORD`. Use something long, e.g. four random words.
 5. Deploy: `npx wrangler deploy`. It prints the address, e.g. `https://menu-cost.<you>.workers.dev`.
@@ -51,7 +53,7 @@ Edit the files, then `npx wrangler deploy`. The address stays the same.
 
 ## Backup
 
-**Settings → Download backup (.json)** saves one shop. D1 also keeps 30 days of history
+**Settings → Download backup (.json)** saves one shop (step photos stay in R2 and are not in the file). D1 also keeps 30 days of history
 (Time Travel: `npx wrangler d1 time-travel info menu-cost`).
 
 ## Test locally (no Cloudflare)
