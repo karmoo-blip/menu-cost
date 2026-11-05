@@ -102,6 +102,7 @@ tbody tr.clickable:hover { background: var(--surface-2); }
 .muted { color: var(--muted); }
 .tag { display: inline-block; font-size: .72rem; padding: 1px 6px; border-radius: 99px; background: var(--surface-2); color: var(--muted); margin-left: 6px; vertical-align: middle; }
 
+.profit-pct { margin-left: 6px; font-size: .82rem; opacity: .75; }
 .pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: .85rem; font-weight: 600; }
 .pill.ok { background: var(--ok-bg); color: var(--ok); }
 .pill.warn { background: var(--warn-bg); color: var(--warn); }
@@ -251,7 +252,7 @@ input.error { border-color: var(--bad); }
   .menus-table .c-sell { grid-area: sell; }
   .menus-table .c-cost { grid-area: cost; }
   .menus-table .c-profit { grid-area: profit; }
-  .menus-table .c-extras, .menus-table .c-suggested { display: none; }
+  .menus-table .c-extras, .menus-table .c-breakeven { display: none; }
 
   .ingredients-table tr { grid-template-areas: "name name name" "used used used" "buy pack unit"; }
   .ingredients-table .c-name { grid-area: name; }

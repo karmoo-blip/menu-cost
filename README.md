@@ -4,6 +4,7 @@ A small web app for a restaurant or café to work out the cost, food cost % and 
 
 - Add ingredients (buy price + pack size), build menus from them, see cost per plate.
 - Extra costs (wages, gas, rent) as % of sell price or a fixed amount per plate.
+- Break-even price (lowest price that covers ingredients and all extra costs) and profit % left at your sell price.
 - Several shops, each with its own currency (THB or GBP).
 - CSV import/export for ingredients, CSV export for menu costs.
 - Optional example data (only loaded when you press the button).

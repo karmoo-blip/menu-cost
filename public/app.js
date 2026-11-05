@@ -144,12 +144,15 @@ function calcMenu(menu) {
   const ingredientCost = batchCost / portions;
   const price = num(menu.sellPrice);
   let extrasCost = 0;
+  let pctExtras = 0;   // sum of "% of sell price" extras, as a fraction
+  let fixedExtras = 0; // sum of "fixed per plate" extras
   const extrasLines = [];
   if (menu.useExtras !== false) {
     for (const ex of data.extras) {
       const amount = ex.type === 'percent'
         ? (Number.isFinite(price) ? price * ex.value / 100 : 0)
         : ex.value;
+      if (ex.type === 'percent') pctExtras += ex.value / 100; else fixedExtras += ex.value;
       extrasCost += amount;
       extrasLines.push({ name: ex.name, amount, ex });
     }
@@ -157,6 +160,10 @@ function calcMenu(menu) {
   const totalCost = ingredientCost + extrasCost;
   const hasPrice = Number.isFinite(price) && price > 0;
   const foodCostPct = hasPrice ? ingredientCost / price : NaN;
+  const profit = hasPrice ? price - totalCost : NaN;
+  // Lowest price that covers ingredients and all extras. None exists if % extras reach 100%.
+  const breakEvenOk = pctExtras < 1;
+  const breakEvenPrice = breakEvenOk ? (ingredientCost + fixedExtras) / (1 - pctExtras) : NaN;
   const target = data.targetCostPct / 100;
   let status = 'none';
   if (hasPrice && menu.items.length) {
@@ -166,8 +173,9 @@ function calcMenu(menu) {
     portions, batchCost, ingredientCost, extrasCost, extrasLines, totalCost,
     foodCostPct,
     totalCostPct: hasPrice ? totalCost / price : NaN,
-    profit: hasPrice ? price - totalCost : NaN,
-    suggestedPrice: target > 0 ? ingredientCost / target : NaN,
+    profit,
+    profitPct: hasPrice ? profit / price : NaN,
+    breakEvenPrice, breakEvenOk,
     status, problems,
   };
 }
@@ -358,9 +366,10 @@ function menusCSV() {
     const c = calcMenu(m);
     const r = v => Number.isFinite(v) ? v.toFixed(2) : '';
     return [m.name, m.category || '', r(num(m.sellPrice)), r(c.ingredientCost), r(c.extrasCost), r(c.totalCost),
-      Number.isFinite(c.foodCostPct) ? (c.foodCostPct * 100).toFixed(1) : '', r(c.profit), r(c.suggestedPrice)];
+      Number.isFinite(c.foodCostPct) ? (c.foodCostPct * 100).toFixed(1) : '', r(c.profit),
+      Number.isFinite(c.profitPct) ? (c.profitPct * 100).toFixed(1) : '', r(c.breakEvenPrice)];
   });
-  return toCSV([['menu', 'category', 'sell_price', 'ingredient_cost', 'extras_cost', 'total_cost', 'food_cost_pct', 'profit', 'suggested_price'], ...rows]);
+  return toCSV([['menu', 'category', 'sell_price', 'ingredient_cost', 'extras_cost', 'total_cost', 'food_cost_pct', 'profit', 'profit_pct', 'break_even_price'], ...rows]);
 }
 
 /* ---------- storage: this browser only ---------- */
@@ -786,7 +795,7 @@ function renderMenus() {
       <button class="btn" data-action="export-menus">Export CSV</button>
     </div>
     <div class="card table-wrap"><table class="rtable menus-table">
-      <thead><tr><th>Menu</th><th class="num">Cost / plate</th><th class="num">Extras</th><th class="num">Sell price</th><th>Food cost</th><th class="num">Profit / plate</th><th class="num">Suggested price</th></tr></thead>
+      <thead><tr><th>Menu</th><th class="num">Cost / plate</th><th class="num">Extras</th><th class="num">Sell price</th><th>Food cost</th><th class="num">Profit / plate</th><th class="num">Break-even</th></tr></thead>
       <tbody>${menus.map(m => {
         const c = calcMenu(m);
         return `<tr class="clickable" data-action="edit-menu" data-id="${esc(m.id)}">
@@ -795,12 +804,12 @@ function renderMenus() {
           <td class="num muted c-extras" data-label="Extras">${c.extrasCost ? money(c.extrasCost) : '—'}</td>
           <td class="num c-sell" data-label="Sell">${money(num(m.sellPrice))}</td>
           <td class="c-pill">${statusPill(c)}</td>
-          <td class="num c-profit" data-label="Profit" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}</td>
-          <td class="num muted c-suggested" data-label="Suggested">${money(c.suggestedPrice)}</td>
+          <td class="num c-profit" data-label="Profit" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}${Number.isFinite(c.profitPct) ? `<span class="profit-pct">${pct(c.profitPct)}</span>` : ''}</td>
+          <td class="num muted c-breakeven" data-label="Break-even">${money(c.breakEvenPrice)}</td>
         </tr>`;
       }).join('') || `<tr><td colspan="7" class="muted no-match">No menus match "${esc(state.search)}".</td></tr>`}</tbody>
     </table></div>
-    <p class="muted" style="font-size:.85rem">Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Suggested price hits your ${d.targetCostPct}% target.</p>`;
+    <p class="muted" style="font-size:.85rem">Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Break-even = lowest price that covers ingredients and all extra costs. Profit % = what is left of the sell price.</p>`;
 }
 
 /* Ingredients tab */
@@ -1075,8 +1084,10 @@ function menuModal(menu) {
       <dt>Sell price</dt><dd>${money(num(draft.sellPrice))}</dd>
       <dt>Food cost %</dt><dd>${statusPill(c)}</dd>
       <dt class="total">Profit per plate</dt><dd class="total" style="${c.profit < 0 ? 'color:var(--bad)' : ''}">${money(c.profit)}</dd>
-      <dt>Suggested price at ${d.targetCostPct}%</dt><dd>${money(c.suggestedPrice)}</dd>
+      <dt class="total">Profit %</dt><dd class="total" style="${c.profitPct < 0 ? 'color:var(--bad)' : ''}">${pct(c.profitPct)}</dd>
+      <dt>Break-even price (covers all costs)</dt><dd>${money(c.breakEvenPrice)}</dd>
     </dl>
+    ${c.breakEvenOk ? '' : '<p class="error-text" style="margin:8px 0 0">Extra costs are 100% or more of the sell price, so no price can cover them. Lower the % extra costs.</p>'}
     ${c.problems ? `<p class="error-text" style="margin:8px 0 0">${c.problems} ingredient line(s) are incomplete and not counted.</p>` : ''}`;
   };
 
