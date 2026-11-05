@@ -165,6 +165,12 @@ input.error { border-color: var(--bad); }
 .summary .total { font-weight: 700; color: var(--text); }
 .summary hr { grid-column: 1 / -1; border: 0; border-top: 1px solid var(--border); margin: 4px 0; width: 100%; }
 .check { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+.extras-pick { margin-top: 14px; }
+.extras-pick h3 { font-size: 1rem; margin-bottom: 4px; }
+.extras-pick .check { margin: 6px 0; cursor: pointer; }
+.extras-pick .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+.extras-pick .amt { margin-left: auto; color: var(--muted); font-size: .85rem; font-variant-numeric: tabular-nums; }
+.extras-pick .hint { margin: 4px 0 0; }
 
 /* Stats */
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 14px; }
@@ -261,7 +267,8 @@ input.error { border-color: var(--bad); }
   .ingredients-table .c-pack { grid-area: pack; }
   .ingredients-table .c-unit { grid-area: unit; }
 
-  .extras-table tr { grid-template-areas: "name name amount" "type type type"; }
+  .extras-table tr { grid-template-areas: "name name amount" "type type used"; }
+  .extras-table .c-used { grid-area: used; justify-self: end; font-size: .82rem; margin-top: 3px; }
   .extras-table .c-name { grid-area: name; }
   .extras-table .c-amount { grid-area: amount; justify-self: end; font-weight: 600; font-variant-numeric: tabular-nums; }
   .extras-table .c-type { grid-area: type; color: var(--muted); font-size: .82rem; margin-top: 3px; }

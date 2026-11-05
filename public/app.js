@@ -106,7 +106,22 @@ function normalizeShop(d) {
   d.extras = d.extras || [];
   d.currency = CURRENCIES[d.currency] ? d.currency : 'THB';
   if (!Number.isFinite(d.targetCostPct)) d.targetCostPct = 35;
+  tidyMenuExtras(d);
   return d;
+}
+
+// Each menu keeps a list of extra cost ids it leaves out, so new extras apply to every menu.
+// Turns the old all-or-nothing `useExtras: false` into "leave out every extra", and drops ids of deleted extras.
+function tidyMenuExtras(d) {
+  const ids = new Set(d.extras.map(e => e.id));
+  for (const m of d.menus) {
+    if (m.useExtras === false) m.excludedExtras = [...ids];
+    delete m.useExtras;
+    m.excludedExtras = (m.excludedExtras || []).filter(id => ids.has(id));
+  }
+}
+function menuUsesExtra(menu, extraId) {
+  return !(menu.excludedExtras || []).includes(extraId);
 }
 
 function findIngredient(id) {
@@ -147,15 +162,14 @@ function calcMenu(menu) {
   let pctExtras = 0;   // sum of "% of sell price" extras, as a fraction
   let fixedExtras = 0; // sum of "fixed per plate" extras
   const extrasLines = [];
-  if (menu.useExtras !== false) {
-    for (const ex of data.extras) {
-      const amount = ex.type === 'percent'
-        ? (Number.isFinite(price) ? price * ex.value / 100 : 0)
-        : ex.value;
-      if (ex.type === 'percent') pctExtras += ex.value / 100; else fixedExtras += ex.value;
-      extrasCost += amount;
-      extrasLines.push({ name: ex.name, amount, ex });
-    }
+  for (const ex of data.extras) {
+    if (!menuUsesExtra(menu, ex.id)) continue;
+    const amount = ex.type === 'percent'
+      ? (Number.isFinite(price) ? price * ex.value / 100 : 0)
+      : ex.value;
+    if (ex.type === 'percent') pctExtras += ex.value / 100; else fixedExtras += ex.value;
+    extrasCost += amount;
+    extrasLines.push({ name: ex.name, amount, ex });
   }
   const totalCost = ingredientCost + extrasCost;
   const hasPrice = Number.isFinite(price) && price > 0;
@@ -244,7 +258,7 @@ function loadExampleData() {
   for (const [name, category, sellPrice, items] of ex.menus) {
     if (d.menus.some(m => m.name.toLowerCase() === name.toLowerCase())) continue;
     d.menus.push({
-      id: uid('menu'), name, category, sellPrice, yield: 1, useExtras: true, example: true,
+      id: uid('menu'), name, category, sellPrice, yield: 1, excludedExtras: [], example: true,
       items: items
         .filter(([n, , unit]) => UNITS[ids[n].unit].base === UNITS[unit].base)
         .map(([n, qty, unit]) => ({ ingredientId: ids[n].id, qty, unit })),
@@ -260,6 +274,7 @@ function clearExampleData() {
   const d = state.data;
   d.menus = d.menus.filter(m => !m.example);
   d.extras = d.extras.filter(e => !e.example);
+  tidyMenuExtras(d);
   // Keep example ingredients that your own menus still use.
   d.ingredients = d.ingredients.filter(i => !i.example || menusUsing(i.id).length);
 }
@@ -850,7 +865,7 @@ function renderIngredients() {
 
 function renderExtras() {
   const d = state.data;
-  const intro = `<p class="muted">Extra costs like staff wages, gas, electric or rent. They are added to every menu (you can turn them off for one menu in its editor).
+  const intro = `<p class="muted">Extra costs like staff wages, gas, electric or rent. They are added to every menu (untick one in a menu's editor to leave it out of that menu).
     Use <b>% of sell price</b> for costs that grow with sales, or <b>fixed per plate</b> for a set amount.</p>`;
   if (!d.extras.length) {
     return intro + `<div class="card empty"><h3>No extra costs yet</h3><p>Without extras, profit only takes away ingredients and packaging.</p>
@@ -859,12 +874,16 @@ function renderExtras() {
   return intro + `
     <div class="toolbar"><button class="btn primary" data-action="add-extra">+ Add extra cost</button></div>
     <div class="card table-wrap"><table class="rtable extras-table">
-      <thead><tr><th>Name</th><th>Type</th><th class="num">Amount</th></tr></thead>
-      <tbody>${d.extras.map(e => `<tr class="clickable" data-action="edit-extra" data-id="${esc(e.id)}">
+      <thead><tr><th>Name</th><th>Type</th><th class="num">Amount</th><th class="num">Used in</th></tr></thead>
+      <tbody>${d.extras.map(e => {
+        const used = d.menus.filter(m => menuUsesExtra(m, e.id)).length;
+        return `<tr class="clickable" data-action="edit-extra" data-id="${esc(e.id)}">
         <td class="c-name"><b>${esc(e.name)}</b>${e.example ? '<span class="tag">example</span>' : ''}</td>
         <td class="c-type">${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</td>
         <td class="num c-amount">${e.type === 'percent' ? fmtNum(e.value) + '%' : money(e.value)}</td>
-      </tr>`).join('')}</tbody>
+        <td class="num muted c-used">${used ? `${used} of ${d.menus.length} menus` : 'Not used'}</td>
+      </tr>`;
+      }).join('')}</tbody>
     </table></div>`;
 }
 
@@ -1022,7 +1041,7 @@ function extraModal(ex) {
       <p class="hint">Tip: monthly wages ÷ monthly sales = % of sell price. Monthly gas ÷ plates sold = fixed per plate.</p>
     </form>`,
     buttons: [
-      ...(isNew ? [] : [{ label: 'Delete', className: 'danger left', onClick: () => mutate(d => { d.extras = d.extras.filter(e => e.id !== ex.id); }) }]),
+      ...(isNew ? [] : [{ label: 'Delete', className: 'danger left', onClick: () => mutate(d => { d.extras = d.extras.filter(e => e.id !== ex.id); tidyMenuExtras(d); }) }]),
       { label: 'Cancel' },
       { label: 'Save', className: 'primary', onClick: () => {
         const f = $('#extra-form');
@@ -1051,7 +1070,8 @@ function menuModal(menu) {
   }
   const isNew = !menu;
   // Edit a copy so Cancel throws changes away.
-  const draft = structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, useExtras: true, items: [] });
+  const draft = structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [] });
+  draft.excludedExtras = draft.excludedExtras || [];
   if (!draft.items.length) draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
   const ingredients = [...d.ingredients].sort(byName);
   const categories = [...new Set(d.menus.map(m => m.category).filter(Boolean))].sort();
@@ -1111,7 +1131,12 @@ function menuModal(menu) {
         <tbody id="lines"></tbody>
       </table></div>
       <button class="btn small" type="button" id="add-line" style="margin-top:8px">+ Add ingredient</button>
-      ${d.extras.length ? `<label class="check"><input type="checkbox" name="useExtras" ${draft.useExtras !== false ? 'checked' : ''}> Include extra costs (${d.extras.map(e => esc(e.name)).join(', ')})</label>` : ''}
+      ${d.extras.length ? `<div class="extras-pick">
+        <h3>Extra costs for this menu</h3>
+        ${d.extras.map(e => `<label class="check"><input type="checkbox" data-extra="${esc(e.id)}" ${menuUsesExtra(draft, e.id) ? 'checked' : ''}> ${esc(e.name)}
+          <span class="amt">${e.type === 'percent' ? fmtNum(e.value) + '% of price' : money(e.value) + ' per plate'}</span></label>`).join('')}
+        <p class="hint">Untick a cost this menu does not use, e.g. no gas for a cold drink.</p>
+      </div>` : ''}
       <div class="summary" id="summary"></div>
       <p class="error-text" id="menu-error"></p>
     </form>`,
@@ -1160,7 +1185,7 @@ function menuModal(menu) {
         draft.category = f.category.value.trim();
         draft.sellPrice = f.sellPrice.value;
         draft.yield = Math.max(1, Math.round(num(f.yield.value)) || 1);
-        if (f.useExtras) draft.useExtras = f.useExtras.checked;
+        draft.excludedExtras = $$('[data-extra]', f).filter(cb => !cb.checked).map(cb => cb.dataset.extra);
       };
       f.addEventListener('input', e => {
         const tr = e.target.closest('tr[data-idx]');
@@ -1177,7 +1202,7 @@ function menuModal(menu) {
         } else readForm();
         drawSummary();
       });
-      f.addEventListener('change', e => { if (e.target.name === 'useExtras') { readForm(); drawSummary(); } });
+      f.addEventListener('change', e => { if (e.target.dataset.extra) { readForm(); drawSummary(); } });
       f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
       linesEl.addEventListener('click', e => {
         const btn = e.target.closest('[data-remove]');
