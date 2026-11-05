@@ -21,6 +21,18 @@ const UNITS = {
   l:   { base: 'ml',  factor: 1000 },
   pcs: { base: 'pcs', factor: 1 },
 };
+// Built-in units plus the shop's own measurements, e.g. { name: 'shot', amount: 30, unit: 'ml' }.
+function unitInfo(name) {
+  if (UNITS[name]) return UNITS[name];
+  const m = state.data?.measures?.find(x => x.name === name);
+  return m && UNITS[m.unit] ? { base: UNITS[m.unit].base, factor: m.amount * UNITS[m.unit].factor, measure: m } : undefined;
+}
+function unitNames() {
+  return [...Object.keys(UNITS), ...(state.data?.measures || []).map(m => m.name)];
+}
+// Units for "size of each" / a measurement: weight or volume, not pieces.
+const SIZE_BASE_UNITS = Object.keys(UNITS).filter(u => UNITS[u].base !== 'pcs');
+
 const CURRENCIES = { THB: 'Thai Baht (฿)', GBP: 'British Pound (£)' };
 
 /* ---------- helpers ---------- */
@@ -98,6 +110,7 @@ function emptyShop(name, currency) {
     ingredients: [],
     menus: [],
     extras: [],
+    measures: [],
   };
 }
 
@@ -106,6 +119,7 @@ function normalizeShop(d) {
   d.ingredients = d.ingredients || [];
   d.menus = d.menus || [];
   d.extras = d.extras || [];
+  d.measures = (d.measures || []).filter(m => m && m.name && UNITS[m.unit] && UNITS[m.unit].base !== 'pcs' && m.amount > 0);
   d.currency = CURRENCIES[d.currency] ? d.currency : 'THB';
   if (!Number.isFinite(d.targetCostPct)) d.targetCostPct = 35;
   for (const m of d.menus) if (!Array.isArray(m.steps)) m.steps = [];
@@ -137,13 +151,13 @@ function costPerPackUnit(ing) {
 }
 // Cost of one base unit (g / ml / pcs).
 function costPerBaseUnit(ing) {
-  const u = UNITS[ing.unit];
+  const u = unitInfo(ing.unit);
   return u && ing.packSize > 0 ? ing.buyPrice / (ing.packSize * u.factor) : NaN;
 }
 function recipeLineCost(line) {
   const ing = findIngredient(line.ingredientId);
-  const u = UNITS[line.unit];
-  if (!ing || !u || UNITS[ing.unit]?.base !== u.base) return NaN;
+  const u = unitInfo(line.unit);
+  if (!ing || !u || unitInfo(ing.unit)?.base !== u.base) return NaN;
   return num(line.qty) * u.factor * costPerBaseUnit(ing);
 }
 function menusUsing(ingredientId) {
@@ -282,7 +296,7 @@ function loadExampleData() {
     d.menus.push({
       id: uid('menu'), name, category, sellPrice, yield: 1, excludedExtras: [], example: true,
       items: items
-        .filter(([n, , unit]) => UNITS[ids[n].unit].base === UNITS[unit].base)
+        .filter(([n, , unit]) => unitInfo(ids[n].unit).base === unitInfo(unit).base)
         .map(([n, qty, unit]) => ({ ingredientId: ids[n].id, qty, unit })),
     });
   }
@@ -361,17 +375,19 @@ function planImport(text) {
     const name = (r[col('name')] || '').trim();
     const buyPrice = num(r[col('buy_price')]);
     const packSize = num(r[col('pack_size')]);
-    const unit = (r[col('unit')] || '').trim().toLowerCase();
+    // Match units ignoring case, e.g. "Shot" → your "shot" measurement.
+    const rawUnit = (r[col('unit')] || '').trim().toLowerCase();
+    const unit = unitNames().find(u => u.toLowerCase() === rawUnit) || rawUnit;
     if (!name) return result.errors.push(`Row ${line}: name is empty.`);
     if (!(buyPrice >= 0)) return result.errors.push(`Row ${line} (${name}): buy_price is not a number.`);
     if (!(packSize > 0)) return result.errors.push(`Row ${line} (${name}): pack_size must be more than 0.`);
-    if (!UNITS[unit]) return result.errors.push(`Row ${line} (${name}): unit "${unit}" not known. Use ${Object.keys(UNITS).join(', ')}.`);
+    if (!unitInfo(unit)) return result.errors.push(`Row ${line} (${name}): unit "${unit}" not known. Use ${unitNames().join(', ')}.`);
     const key = name.toLowerCase();
     if (seen.has(key)) return result.errors.push(`Row ${line} (${name}): same name appears twice in the file.`);
     seen.add(key);
     const existing = state.data.ingredients.find(i => i.name.toLowerCase() === key);
     if (existing) {
-      if (UNITS[existing.unit].base !== UNITS[unit].base && menusUsing(existing.id).length) {
+      if (unitInfo(existing.unit).base !== unitInfo(unit).base && menusUsing(existing.id).length) {
         return result.errors.push(`Row ${line} (${name}): unit type changes (${existing.unit} → ${unit}) but menus use it. Fix by hand.`);
       }
       result.updates.push({ existing, buyPrice, packSize, unit });
@@ -1132,6 +1148,39 @@ function renderExtras() {
 
 /* Settings tab */
 
+// Where a measurement is used: menu lines and ingredients bought in it.
+function measureUse(name) {
+  const d = state.data;
+  return {
+    menus: d.menus.filter(m => m.items.some(l => l.unit === name)),
+    ingredients: d.ingredients.filter(i => i.unit === name),
+  };
+}
+
+function renderMeasures() {
+  const list = state.data.measures;
+  const body = list.length
+    ? `<ul class="measure-list">${[...list].sort((a, b) => a.name.localeCompare(b.name)).map(m => {
+        const u = measureUse(m.name);
+        const n = u.menus.length;
+        const used = n ? `${n} menu${n === 1 ? '' : 's'}` : u.ingredients.length ? `${u.ingredients.length} ingredient${u.ingredients.length === 1 ? '' : 's'}` : 'Not used';
+        const vol = UNITS[m.unit].base === 'ml';
+        return `<li data-action="edit-measure" data-name="${esc(m.name)}">
+          <span class="m-name">${esc(m.name)}</span>
+          <span class="m-eq">= ${fmtNum(m.amount)} ${esc(m.unit)} <span class="chip ${vol ? 'tint-sky' : 'tint-peach'}">${vol ? 'volume' : 'weight'}</span></span>
+          <span class="m-used">${used}</span></li>`;
+      }).join('')}</ul>`
+    : `<div class="measure-empty"><span class="empty-emoji small" aria-hidden="true">🥄</span>
+        <b>No measurements of your own yet</b><span class="muted">For example: shot = 30 ml, scoop = 12 g, pump = 10 ml.</span></div>`;
+  return `<section class="card pad">
+      <h2>📏 Measurements</h2>
+      <p class="muted">Add the measures you use behind the counter. They show up in every unit list.</p>
+      ${body}
+      <div class="toolbar"><button class="btn primary" data-action="add-measure">+ Add measurement</button></div>
+      <p class="hint" style="margin:12px 0 0">Built in: ${Object.keys(UNITS).join(', ')}</p>
+    </section>`;
+}
+
 function renderSettings() {
   const d = state.data;
   return `<div class="settings">
@@ -1148,6 +1197,7 @@ function renderSettings() {
         <button class="btn primary" type="submit">Save settings</button>
       </form>
     </section>
+    ${renderMeasures()}
     <section class="card pad">
       <h2>🧪 Example data</h2>
       <div class="toolbar">
@@ -1228,21 +1278,23 @@ function confirmModal(title, text, label, onYes) {
   });
 }
 
-function unitOptions(selected, base) {
-  return Object.keys(UNITS)
-    .filter(u => !base || UNITS[u].base === base)
-    .map(u => `<option value="${u}" ${u === selected ? 'selected' : ''}>${u}</option>`).join('');
+function unitOptions(selected, base, { noPieces = false } = {}) {
+  const fits = u => (!base || unitInfo(u).base === base) && !(noPieces && unitInfo(u).base === 'pcs');
+  const opt = (u, text = u) => `<option value="${esc(u)}" ${u === selected ? 'selected' : ''}>${esc(text)}</option>`;
+  const builtIn = Object.keys(UNITS).filter(fits).map(u => opt(u)).join('');
+  const own = (state.data?.measures || []).filter(m => fits(m.name))
+    .map(m => opt(m.name, `${m.name} (${fmtNum(m.amount)} ${m.unit})`)).join('');
+  return builtIn + (own ? `<optgroup label="Your measurements">${own}</optgroup>` : '');
 }
 
 // Units for "size of each" in the pack size calculator: weight or volume, not pieces.
-const SIZE_UNITS = Object.keys(UNITS).filter(u => UNITS[u].base !== 'pcs');
 
 // Menu lines that use an ingredient by the piece become an amount of `unit`: 1 pcs → `each` unit.
 function convertPieceLines(items, ingredientId, each, unit) {
   for (const line of items) {
-    if (line.ingredientId === ingredientId && UNITS[line.unit]?.base === 'pcs') {
+    if (line.ingredientId === ingredientId && unitInfo(line.unit)?.base === 'pcs') {
       const q = num(line.qty);
-      line.qty = Number.isFinite(q) ? +(q * UNITS[line.unit].factor * each).toFixed(3) : line.qty;
+      line.qty = Number.isFinite(q) ? +(q * unitInfo(line.unit).factor * each).toFixed(3) : line.qty;
       line.unit = unit;
     }
   }
@@ -1253,7 +1305,7 @@ function ingredientModal(ing, opts = {}) {
   const isNew = !ing;
   ing = ing || { name: '', buyPrice: '', packSize: '', unit: 'g' };
   const used = isNew ? [] : menusUsing(ing.id);
-  const oldBase = UNITS[ing.unit]?.base;
+  const oldBase = unitInfo(ing.unit)?.base;
   let lockBase = used.length ? oldBase : null;
   let conversion = null; // { each, unit } once "Use this" switches a by-the-piece ingredient to weight/volume
   let saved = false;
@@ -1264,7 +1316,7 @@ function ingredientModal(ing, opts = {}) {
     const count = num(calc.count), each = num(calc.each);
     const total = count * each;
     const ok = count > 0 && each > 0;
-    const newBase = UNITS[calc.unit].base;
+    const newBase = unitInfo(calc.unit).base;
     const price = num($('#ing-form [name=buyPrice]')?.value ?? ing.buyPrice);
     const perUnit = ok && price >= 0 ? price / total : NaN;
     let notice = '';
@@ -1282,7 +1334,7 @@ function ingredientModal(ing, opts = {}) {
         <label class="field"><span>How many did you buy?</span><input type="number" data-calc-field="count" value="${esc(calc.count)}" min="0" step="any"></label>
         <span class="calc-times" aria-hidden="true">×</span>
         <label class="field"><span>Size of each</span><input type="number" data-calc-field="each" value="${esc(calc.each)}" min="0" step="any" placeholder="e.g. 250" class="${calc.each !== '' && !(each > 0) ? 'error' : ''}"></label>
-        <label class="field calc-unit"><span>Unit</span><select data-calc-field="unit">${SIZE_UNITS.map(u => `<option value="${u}" ${u === calc.unit ? 'selected' : ''}>${u}</option>`).join('')}</select></label>
+        <label class="field calc-unit"><span>Unit</span><select data-calc-field="unit">${unitOptions(calc.unit, null, { noPieces: true })}</select></label>
       </div>
       ${notice}
       ${calc.applied ? `<div class="notice ok">✓ ${esc(calc.applied)}</div>` : ''}
@@ -1325,9 +1377,9 @@ function ingredientModal(ing, opts = {}) {
         if (state.data.ingredients.some(i => i.id !== ing.id && i.name.toLowerCase() === name.toLowerCase())) {
           $('#ing-error').textContent = 'An ingredient with this name already exists.'; return true;
         }
-        const newBase = UNITS[v.unit].base;
+        const newBase = unitInfo(v.unit).base;
         const convert = used.length && newBase !== oldBase ? conversion : null;
-        if (used.length && newBase !== oldBase && !(convert && UNITS[convert.unit].base === newBase)) {
+        if (used.length && newBase !== oldBase && !(convert && unitInfo(convert.unit).base === newBase)) {
           $('#ing-error').textContent = 'This ingredient is used in menus, so its unit type can only change with the calculator.'; return true;
         }
         mutate(d => {
@@ -1378,7 +1430,7 @@ function ingredientModal(ing, opts = {}) {
           const count = num(calc.count), each = num(calc.each);
           if (!(count > 0 && each > 0)) return;
           const total = +(count * each).toFixed(3);
-          const newBase = UNITS[calc.unit].base;
+          const newBase = unitInfo(calc.unit).base;
           if (used.length) {
             lockBase = newBase;
             conversion = oldBase === 'pcs' ? { each, unit: calc.unit } : null;
@@ -1395,6 +1447,91 @@ function ingredientModal(ing, opts = {}) {
       });
       f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
       drawCalc();
+      update();
+    },
+  });
+}
+
+function measureModal(m) {
+  const isNew = !m;
+  m = m || { name: '', amount: '', unit: 'ml' };
+  const oldName = m.name; // m is the saved object, so keep the name before it changes
+  const use = isNew ? { menus: [], ingredients: [] } : measureUse(m.name);
+  const inUse = use.menus.length + use.ingredients.length > 0;
+  const lockBase = inUse ? UNITS[m.unit].base : null;
+  const unitList = SIZE_BASE_UNITS.filter(u => !lockBase || UNITS[u].base === lockBase)
+    .map(u => `<option value="${u}" ${u === m.unit ? 'selected' : ''}>${u}</option>`).join('');
+  const usedNames = [...use.menus.map(x => x.name), ...use.ingredients.map(x => x.name)];
+
+  openModal({
+    title: isNew ? 'Add measurement' : 'Edit measurement',
+    body: `<form id="measure-form">
+      <label class="field"><span>Name</span><input type="text" name="name" value="${esc(m.name)}" maxlength="20" required placeholder="e.g. shot"></label>
+      <div class="eq-row">
+        <span class="eq-one" id="eq-one">1 ${esc(m.name || '…')} =</span>
+        <label class="field"><span>Amount</span><input type="number" name="amount" value="${esc(m.amount)}" min="0" step="any" required></label>
+        <label class="field"><span>Unit</span><select name="unit">${unitList}</select></label>
+      </div>
+      <p class="hint" style="margin-top:8px">${inUse
+        ? `Changing the amount updates the cost of everything that uses ${esc(m.name)}. ${lockBase === 'ml' ? 'Volume' : 'Weight'} stays ${lockBase === 'ml' ? 'volume' : 'weight'} while it's in use.`
+        : "Use a short name you'd say out loud: shot, scoop, pump, tbsp."}</p>
+      <div class="measure-preview" id="measure-preview"></div>
+      <p class="error-text" id="measure-error"></p>
+    </form>`,
+    buttons: [
+      ...(isNew ? [] : [{ label: 'Delete', className: 'danger left', onClick: () => {
+        if (inUse) {
+          $('#measure-error').textContent = `Can't delete: ${m.name} is used in ${usedNames.slice(0, 4).join(', ')}${usedNames.length > 4 ? '…' : ''}. Change those first.`;
+          return true;
+        }
+        mutate(d => { d.measures = d.measures.filter(x => x.name !== oldName); });
+        toast('Measurement deleted', 'ok');
+      } }]),
+      { label: 'Cancel' },
+      { label: 'Save', className: 'primary', onClick: () => {
+        const f = $('#measure-form');
+        if (!f.reportValidity()) return true;
+        const v = Object.fromEntries(new FormData(f));
+        const name = v.name.trim();
+        const amount = num(v.amount);
+        const err = t => { $('#measure-error').textContent = t; f.name.classList.toggle('error', true); return true; };
+        if (!name) return err('Enter a name.');
+        if (Object.keys(UNITS).some(u => u.toLowerCase() === name.toLowerCase())) return err(`“${name}” is already a unit. Pick another name.`);
+        if (state.data.measures.some(x => x.name !== oldName && x.name.toLowerCase() === name.toLowerCase())) return err(`You already have a measurement called “${name}”.`);
+        if (!(amount > 0)) { $('#measure-error').textContent = 'Amount must be more than 0.'; return true; }
+        mutate(d => {
+          const fields = { name, amount, unit: v.unit };
+          if (isNew) { d.measures.push(fields); return; }
+          Object.assign(d.measures.find(x => x.name === oldName), fields);
+          if (name !== oldName) {
+            // Renamed: update everything that used the old name.
+            for (const i of d.ingredients) if (i.unit === oldName) i.unit = name;
+            for (const menu of d.menus) for (const l of menu.items) if (l.unit === oldName) l.unit = name;
+          }
+        });
+        toast(isNew ? `Added ${name}` : 'Measurement saved', 'ok');
+      } },
+    ],
+    onOpen: modal => {
+      const f = $('#measure-form', modal);
+      const update = () => {
+        const name = f.name.value.trim() || '…';
+        const amount = num(f.amount.value);
+        const unit = f.unit.value;
+        $('#eq-one', modal).textContent = `1 ${name} =`;
+        const sample = [...state.data.ingredients].sort(byName).find(i => unitInfo(i.unit)?.base === UNITS[unit].base);
+        let text = '';
+        if (amount > 0) {
+          const two = 2 * amount;
+          text = `2 ${name} = ${fmtNum(two)} ${unit}`;
+          if (sample) text += ` · of ${sample.name}: ${money(two * UNITS[unit].factor * costPerBaseUnit(sample))}`;
+        }
+        const box = $('#measure-preview', modal);
+        box.textContent = text;
+        box.hidden = !text;
+      };
+      f.addEventListener('input', () => { f.name.classList.remove('error'); $('#measure-error', modal).textContent = ''; update(); });
+      f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
       update();
     },
   });
@@ -1460,7 +1597,7 @@ function menuModal(menu, draftIn = null) {
 
   const lineRow = (line, idx) => {
     const ing = findIngredient(line.ingredientId);
-    const base = ing ? UNITS[ing.unit].base : null;
+    const base = ing ? unitInfo(ing.unit).base : null;
     return `<tr data-idx="${idx}">
       <td class="ing"><select data-field="ingredientId">
         <option value="">Choose…</option>
@@ -1619,7 +1756,7 @@ function menuModal(menu, draftIn = null) {
           if (field === 'ingredientId') {
             // Switch the unit to one that fits the chosen ingredient.
             const ing = findIngredient(line.ingredientId);
-            if (ing && UNITS[line.unit].base !== UNITS[ing.unit].base) line.unit = UNITS[ing.unit].base;
+            if (ing && unitInfo(line.unit).base !== unitInfo(ing.unit).base) line.unit = unitInfo(ing.unit).base;
             drawLines();
           }
         } else readForm();
@@ -1706,7 +1843,7 @@ function importModal() {
   openModal({
     title: 'Import ingredients from CSV',
     body: `<p>Columns needed (first row): <code>${CSV_HEADER.join(',')}</code></p>
-      <p class="hint" style="margin:0 0 12px">Units: ${Object.keys(UNITS).join(', ')}. If an ingredient name already exists, its price and pack size are updated.</p>
+      <p class="hint" style="margin:0 0 12px">Units: ${unitNames().join(', ')}. If an ingredient name already exists, its price and pack size are updated.</p>
       <input type="file" id="csv-file" accept=".csv,text/csv">
       <div id="import-preview" style="margin-top:14px"></div>`,
     buttons: [
@@ -1771,6 +1908,8 @@ const ACTIONS = {
   'add-ingredient': () => ingredientModal(null),
   'edit-ingredient': el => ingredientModal(state.data.ingredients.find(i => i.id === el.dataset.id)),
   'add-extra': () => extraModal(null),
+  'add-measure': () => measureModal(null),
+  'edit-measure': el => measureModal(state.data.measures.find(m => m.name === el.dataset.name)),
   'edit-extra': el => extraModal(state.data.extras.find(e => e.id === el.dataset.id)),
   'import-csv': importModal,
   'csv-menu': () => openModal({

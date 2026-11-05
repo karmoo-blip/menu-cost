@@ -242,6 +242,20 @@ tbody tr.clickable:hover { background: var(--surface-2); }
 .settings { display: grid; gap: 16px; max-width: 600px; }
 .settings p.muted { margin-top: 0; }
 
+/* Settings: your own measurements */
+.measure-list { list-style: none; margin: 0 0 14px; padding: 0; display: grid; gap: 8px; }
+.measure-list li { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 14px; background: var(--surface-2); cursor: pointer; transition: transform .12s; }
+.measure-list li:hover { transform: translateX(2px); }
+.m-name { font-weight: 800; min-width: 64px; overflow-wrap: anywhere; }
+.m-eq { flex: 1; min-width: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.m-used { color: var(--muted); font-size: .82rem; font-weight: 600; white-space: nowrap; }
+.measure-empty { display: grid; justify-items: center; gap: 4px; text-align: center; padding: 6px 10px 16px; }
+.empty-emoji.small { width: 60px; height: 60px; font-size: 1.8rem; margin-bottom: 4px; }
+.eq-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 96px; gap: 8px; align-items: end; }
+.eq-row label.field { margin: 0; }
+.eq-one { padding-bottom: 10px; font-weight: 800; white-space: nowrap; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
+.measure-preview { background: var(--lav-bg); color: var(--lav); border-radius: 14px; padding: 10px 12px; font-weight: 700; font-size: .9rem; margin-bottom: 8px; }
+
 /* ---------- forms ---------- */
 label.field { display: block; margin-bottom: 14px; }
 label.field > span { display: block; font-size: .82rem; font-weight: 700; color: var(--muted); margin-bottom: 5px; }
