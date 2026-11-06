@@ -1,15 +1,14 @@
 /**
  * Menu Cost — Cloudflare Worker backend.
  * Page files in public/ are served by Workers static assets; this code only handles /api/*.
- * Sign-in is one family password (Worker secret APP_PASSWORD). A correct password gets a signed
- * cookie valid for 30 days. Changing the password signs every device out.
+ * There is no sign-in: anyone with the address can read and change shop data.
+ * New shops and photo uploads are limited per connection so storage cannot be filled up.
  */
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const SESSION_DAYS = 30;
-const COOKIE = 'mc_session';
-const MAX_FAILS = 5;
-const LOCK_SECONDS = 15 * 60;
+const LIMIT_WINDOW_SECONDS = 60 * 60;
+const MAX_NEW_SHOPS_PER_HOUR = 20;
+const MAX_PHOTOS_PER_HOUR = 100;
 
 export default {
   async fetch(request, env) {
@@ -17,10 +16,6 @@ export default {
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
 
     try {
-      if (!env.APP_PASSWORD) throw new HttpError(503, 'The password is not set up yet (wrangler secret put APP_PASSWORD).');
-      if (url.pathname === '/api/login' && request.method === 'POST') return await login(request, env);
-      if (url.pathname === '/api/logout' && request.method === 'POST') return json({ ok: true }, 200, clearCookie());
-      if (!(await validSession(request, env))) throw new HttpError(401, 'You were signed out. Enter the family password again.');
       return await route(request, env, url);
     } catch (err) {
       if (err instanceof HttpError) return json({ error: err.message, ...err.extra }, err.status);
@@ -44,7 +39,7 @@ function json(body, status = 200, headers = {}) {
 /* ---------- routes ---------- */
 
 async function route(request, env, url) {
-  const by = '';  // shared family password, so saves are not tied to a name
+  const by = '';  // no sign-in, so saves are not tied to a name
   const method = request.method;
   const path = url.pathname;
 
@@ -56,6 +51,7 @@ async function route(request, env, url) {
   }
 
   if (path === '/api/shops' && method === 'POST') {
+    await checkLimit(request, env, 'shop', MAX_NEW_SHOPS_PER_HOUR);
     const data = checkShop(await readBody(request));
     const id = 'shop_' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
     const now = new Date().toISOString();
@@ -91,7 +87,10 @@ async function route(request, env, url) {
     return json({ id: m[1], modifiedTime: now, by });
   }
 
-  if (path === '/api/photos' && method === 'POST') return await uploadPhoto(request, env);
+  if (path === '/api/photos' && method === 'POST') {
+    await checkLimit(request, env, 'photo', MAX_PHOTOS_PER_HOUR);
+    return await uploadPhoto(request, env);
+  }
   const p = path.match(/^\/api\/photos\/(p_[a-f0-9]{32}\.(?:jpg|png|webp))$/);
   if (p && method === 'GET') return await getPhoto(env, p[1]);
 
@@ -129,7 +128,7 @@ async function getPhoto(env, key) {
   return new Response(obj.body, {
     headers: {
       'Content-Type': obj.httpMetadata?.contentType || 'application/octet-stream',
-      // Keys are never reused, so the browser can keep a photo. "private": only this signed-in browser.
+      // Keys are never reused, so the browser can keep a photo. "private": not kept by shared caches.
       'Cache-Control': 'private, max-age=31536000, immutable',
       'X-Content-Type-Options': 'nosniff',
     },
@@ -152,62 +151,18 @@ function checkShop(data) {
   return data;
 }
 
-/* ---------- family password sign-in ---------- */
+/* ---------- limits ---------- */
 
-async function login(request, env) {
+// Counts one use per connection and refuses it once the hourly limit is reached.
+async function checkLimit(request, env, kind, max) {
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   const now = Math.floor(Date.now() / 1000);
-  const row = await env.DB.prepare('SELECT fails, first_fail FROM login_attempts WHERE ip = ?').bind(ip).first();
-  const inWindow = row && now - row.first_fail < LOCK_SECONDS;
-  if (inWindow && row.fails >= MAX_FAILS) {
-    const retryAfter = LOCK_SECONDS - (now - row.first_fail);
-    throw new HttpError(429, `Too many wrong tries from this connection. Wait ${Math.ceil(retryAfter / 60)} minutes, then try again.`, { retryAfter });
-  }
-
-  const body = await readBody(request);
-  const password = typeof body?.password === 'string' ? body.password : '';
-  if (!(await sameText(password, env.APP_PASSWORD))) {
-    if (inWindow) {
-      await env.DB.prepare('UPDATE login_attempts SET fails = fails + 1 WHERE ip = ?').bind(ip).run();
-    } else {
-      await env.DB.prepare('INSERT OR REPLACE INTO login_attempts (ip, fails, first_fail) VALUES (?, 1, ?)').bind(ip, now).run();
-    }
-    throw new HttpError(401, 'Wrong password. Check with the family and try again.');
-  }
-
-  await env.DB.prepare('DELETE FROM login_attempts WHERE ip = ?').bind(ip).run();
-  const expires = now + SESSION_DAYS * 24 * 60 * 60;
-  const value = expires + '.' + await sign(String(expires), env.APP_PASSWORD);
-  return json({ ok: true }, 200, {
-    'Set-Cookie': `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_DAYS * 24 * 60 * 60}`,
-  });
-}
-
-function clearCookie() {
-  return { 'Set-Cookie': `${COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0` };
-}
-
-async function validSession(request, env) {
-  const cookies = request.headers.get('Cookie') || '';
-  const m = cookies.match(new RegExp('(?:^|;\\s*)' + COOKIE + '=(\\d+)\\.([A-Za-z0-9_-]+)'));
-  if (!m) return false;
-  if (Number(m[1]) <= Math.floor(Date.now() / 1000)) return false;
-  return sameText(m[2], await sign(m[1], env.APP_PASSWORD));
-}
-
-// HMAC keyed with the password, so a new password makes every old cookie invalid.
-async function sign(text, password) {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode('menu-cost-session:' + password),
-    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(text)));
-  return btoa(String.fromCharCode(...sig)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-// Compares in constant time (hashing first makes the lengths equal).
-async function sameText(a, b) {
-  const [ha, hb] = await Promise.all([a, b].map(async t =>
-    new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t)))));
-  let diff = 0;
-  for (let i = 0; i < ha.length; i++) diff |= ha[i] ^ hb[i];
-  return diff === 0;
+  const row = await env.DB.prepare(
+    `INSERT INTO usage_limits (ip, kind, count, first_at) VALUES (?1, ?2, 1, ?3)
+     ON CONFLICT (ip, kind) DO UPDATE SET
+       count = CASE WHEN ?3 - first_at >= ?4 THEN 1 ELSE count + 1 END,
+       first_at = CASE WHEN ?3 - first_at >= ?4 THEN ?3 ELSE first_at END
+     RETURNING count`
+  ).bind(ip, kind, now, LIMIT_WINDOW_SECONDS).first();
+  if (row.count > max) throw new HttpError(429, 'Too many new items from this connection. Wait an hour, then try again.');
 }

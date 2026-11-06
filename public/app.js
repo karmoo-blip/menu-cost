@@ -505,30 +505,23 @@ const LocalStore = {
 
 /* ---------- storage: Cloudflare (Worker + D1) ---------- */
 
-// Calls the Worker API. The sign-in cookie goes along automatically.
+// Calls the Worker API.
 async function api(method, path, body) {
   const res = await fetch(path, {
     method,
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    credentials: 'same-origin',
   });
   let json = null;
-  try { json = await res.json(); } catch { /* not JSON, e.g. login page after session expired */ }
+  try { json = await res.json(); } catch { /* not JSON */ }
   if (res.status === 409 && json?.conflict) throw Object.assign(new Error('conflict'), json);
-  if (res.status === 401) {
-    throw Object.assign(new Error(json?.error || 'You were signed out. Enter the family password again.'), { auth: true });
-  }
   if (!res.ok || !json) {
-    throw Object.assign(new Error(json?.error || `Server error (${res.status}). Check your internet and try again.`),
-      { status: res.status, retryAfter: json?.retryAfter });
+    throw new Error(json?.error || `Server error (${res.status}). Check your internet and try again.`);
   }
   return json;
 }
 
 const ApiStore = {
-  async login(password) { await api('POST', '/api/login', { password }); },
-  async logout() { await api('POST', '/api/logout'); },
   listShops() { return api('GET', '/api/shops'); },
   create(data) { return api('POST', '/api/shops', data); },
   load(id) { return api('GET', `/api/shops/${encodeURIComponent(id)}`); },
@@ -606,9 +599,8 @@ async function uploadStepPhoto(file) {
 /* ---------- app state & saving ---------- */
 
 const state = {
-  screen: 'loading',  // loading | login | shops | app
-  loginError: '',
-  loginLocked: false,
+  screen: 'loading',  // loading | welcome | shops | app
+  welcomeError: '',
   shops: [],
   shopId: null,
   meta: null,         // { modifiedTime, by }
@@ -651,8 +643,6 @@ async function saveNow() {
       state.saveState = 'error';
       state.saveError = err.message;
       if (err.conflict) showConflict(err);
-      // Unsaved changes stay in memory and are saved again after signing in.
-      if (err.auth) showLogin('You were signed out. Sign in again to save your changes.');
     }
   })();
   await saving;
@@ -685,17 +675,10 @@ document.addEventListener('visibilitychange', () => {
 
 /* ---------- flows ---------- */
 
-async function start() {
+function start() {
+  if (welcomeSeen()) { enterApp(); return; }
+  state.screen = 'welcome';
   render();
-  try {
-    state.shops = await store.listShops();
-  } catch (err) {
-    if (err.auth) { showLogin(); return; }
-    showFatal(`<h2>Could not open Menu Cost</h2><p class="error-text">${esc(err.message)}</p>
-      <p class="muted">Check your internet connection, then reload the page.</p>`);
-    return;
-  }
-  await showShopsAndLastShop();
 }
 
 async function showShopsAndLastShop() {
@@ -705,72 +688,40 @@ async function showShopsAndLastShop() {
   if (last && state.shops.some(s => s.id === last)) await openShop(last);
 }
 
-// Shows a toast, or the sign-in screen when the sign-in has expired.
 function showError(err) {
-  if (err.auth) showLogin(err.message);
-  else toast(err.message, 'bad');
+  toast(err.message, 'bad');
 }
 
 async function refreshShops() {
   try {
     state.shops = await store.listShops();
   } catch (err) {
-    if (err.auth) { showLogin(); return; }
     toast(err.message, 'bad');
   }
   render();
 }
 
-/* ---------- sign-in ---------- */
+/* ---------- welcome page ---------- */
 
-let unlockTimer = null;
-
-function showLogin(message = '') {
-  closeModal();
-  clearTimeout(unlockTimer);
-  state.screen = 'login';
-  state.loginError = message;
-  state.loginLocked = false;
-  render();
+// Shown once each time the site is opened. Reloading in the same tab skips it. It is not a lock.
+function welcomeSeen() {
+  try { return sessionStorage.getItem('menucost_welcomed') === '1'; } catch { return false; }
 }
 
-async function signIn(password) {
+async function enterApp() {
+  try { sessionStorage.setItem('menucost_welcomed', '1'); } catch { /* private browsing */ }
+  state.welcomeError = '';
+  state.screen = 'loading';
+  render();
   try {
-    await store.login(password);
-  } catch (err) {
-    state.loginLocked = err.status === 429;
-    state.loginError = err.message;
+    state.shops = await store.listShops();
+  } catch {
+    state.welcomeError = 'Your shops could not be loaded. Check your internet connection and try again.';
+    state.screen = 'welcome';
     render();
-    if (state.loginLocked) {
-      clearTimeout(unlockTimer);
-      unlockTimer = setTimeout(() => { state.loginLocked = false; state.loginError = ''; render(); }, (err.retryAfter || 900) * 1000);
-    } else {
-      const input = $('#login-password');
-      input.value = password;
-      input.focus();
-      input.select();
-    }
     return;
   }
-  state.loginError = '';
-  if (state.data && state.shopId) {
-    // Signed out in the middle of editing: go back to the shop and save what is pending.
-    state.screen = 'app';
-    render();
-    if (state.saveState === 'error' || state.saveState === 'dirty') { state.saveState = 'dirty'; saveNow(); }
-  } else {
-    await showShopsAndLastShop();
-  }
-}
-
-async function signOut() {
-  if (state.saveState === 'dirty' || state.saveState === 'saving') await saveNow();
-  try { await store.logout(); } catch { /* cookie is cleared server-side; ignore network errors */ }
-  state.shops = [];
-  state.shopId = null;
-  state.data = null;
-  state.meta = null;
-  showLogin();
+  await showShopsAndLastShop();
 }
 
 async function createShop(name, currency) {
@@ -805,41 +756,25 @@ async function switchShop() {
   await refreshShops();
 }
 
-function showFatal(html) {
-  $('#app').innerHTML = `<div class="center-page"><div class="card pad center-card">${html}</div></div>`;
-}
-
 /* ---------- rendering ---------- */
 
 function render() {
   const app = $('#app');
   if (state.screen === 'loading') app.innerHTML = '<div class="center-page"><div class="loading"><span class="hero-logo">☕</span><p class="muted">Loading…</p></div></div>';
-  else if (state.screen === 'login') app.innerHTML = renderLogin();
+  else if (state.screen === 'welcome') app.innerHTML = renderWelcome();
   else if (state.screen === 'shops') app.innerHTML = renderShops();
   else app.innerHTML = renderApp();
   bind();
 }
 
-function renderLogin() {
-  const bad = state.loginError && !state.loginLocked;
+function renderWelcome() {
   return `<div class="center-page"><div class="card pad center-card">
-    <div class="hero"><span class="hero-logo">☕</span>
-      <h1>Menu Cost</h1>
-      <p class="muted">Know what every menu really costs. Enter the family password to start.</p></div>
-    <form id="login-form">
-      <label class="field"><span>Password</span>
-        <input type="password" name="password" id="login-password" autocomplete="current-password" required
-          class="${bad ? 'error' : ''}" ${state.loginLocked ? 'disabled' : ''}></label>
-      <label class="check"><input type="checkbox" id="login-show"> Show password</label>
-      ${state.loginError ? `<p class="login-msg ${state.loginLocked ? 'warn' : 'bad'}">${esc(state.loginError)}</p>` : ''}
-      <button class="btn primary" type="submit" ${state.loginLocked ? 'disabled' : ''}>Sign in</button>
-    </form>
+    <div class="hero"><span class="hero-logo" aria-hidden="true">☕</span>
+      <h1>Welcome to Menu Cost</h1>
+      <p class="muted">Know what every menu really costs, and what to charge for it.</p></div>
+    ${state.welcomeError ? `<p class="welcome-error">${esc(state.welcomeError)}</p>` : ''}
+    <button class="btn primary welcome-go" type="button" data-action="enter-app">${state.welcomeError ? 'Try again' : 'Open my shops'}</button>
   </div></div>`;
-}
-
-function signedInLine() {
-  return `<div class="signed-in"><p class="muted" style="margin:0">Signed in on this device</p>
-    <button class="btn link" data-action="sign-out">Sign out</button></div>`;
 }
 
 function renderShops() {
@@ -854,7 +789,7 @@ function renderShops() {
     : `<p class="muted">No shops yet. Create your first one below.</p>`;
   return `<div class="center-page"><div class="card pad center-card">
     <div class="hero"><span class="hero-logo">☕</span><h1>Choose a shop</h1></div>
-    ${ONLINE ? signedInLine() : '<p class="muted" style="margin:0">Test mode: data is saved in this browser only.</p>'}
+    ${ONLINE ? '' : '<p class="muted" style="margin:0">Test mode: data is saved in this browser only.</p>'}
     ${list}
     <hr class="divider">
     <h2 style="margin-bottom:12px">Create new shop</h2>
@@ -1168,10 +1103,9 @@ function renderSettings() {
     <section class="card pad">
       <h2>💾 Backup</h2>
       <p class="muted">${ONLINE
-        ? 'Saved automatically in your Cloudflare database. To let family use the app, send them the link and the family password.'
+        ? 'Saved automatically in your Cloudflare database. Anyone with the site link can see and change this data, so keep the link private and download a backup often.'
         : 'Test mode: saved in this browser only. Download a backup file to keep a copy.'}</p>
       <div class="toolbar"><button class="btn" data-action="download-backup">Download backup (.json)</button></div>
-      ${ONLINE ? `<hr class="divider">${signedInLine()}` : ''}
     </section>
   </div>`;
 }
@@ -1920,7 +1854,7 @@ function setTab(tab) {
 const ACTIONS = {
   'open-shop': el => openShop(el.dataset.id),
   'switch-shop': switchShop,
-  'sign-out': signOut,
+  'enter-app': enterApp,
   'tab': el => setTab(el.dataset.tab),
   'category': el => { state.category = el.dataset.cat; render(); },
   'menus-more': () => openModal({
@@ -1980,18 +1914,6 @@ function bind() {
       render();
       const s = $('#search');
       s.focus(); s.setSelectionRange(pos, pos);
-    };
-  }
-  const login = $('#login-form');
-  if (login) {
-    const input = $('#login-password');
-    if (!state.loginLocked) input.focus();
-    $('#login-show').onchange = e => { input.type = e.target.checked ? 'text' : 'password'; };
-    login.onsubmit = async e => {
-      e.preventDefault();
-      if (!input.value) return;
-      $('button[type=submit]', login).disabled = true;
-      await signIn(input.value);
     };
   }
   const newShop = $('#new-shop-form');

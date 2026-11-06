@@ -8,9 +8,11 @@ CREATE TABLE IF NOT EXISTS shops (
   updated_by TEXT NOT NULL DEFAULT ''
 );
 
--- Wrong-password counter per connection (5 wrong tries locks it for 15 minutes).
-CREATE TABLE IF NOT EXISTS login_attempts (
-  ip         TEXT PRIMARY KEY,
-  fails      INTEGER NOT NULL,
-  first_fail INTEGER NOT NULL
+-- New shops and photo uploads per connection, to stop storage being filled up.
+CREATE TABLE IF NOT EXISTS usage_limits (
+  ip       TEXT NOT NULL,
+  kind     TEXT NOT NULL,
+  count    INTEGER NOT NULL,
+  first_at INTEGER NOT NULL,
+  PRIMARY KEY (ip, kind)
 );

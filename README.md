@@ -12,16 +12,18 @@ A small web app for a restaurant or café to work out the cost, food cost % and 
 - Optional example data (only loaded when you press the button).
 
 It runs on **Cloudflare**: one Worker serves the page and an API, and the data is stored in a **D1** database
-(`menu-cost`, one row per shop). Sign-in is one **family password**, stored as a Cloudflare secret, so nothing
-secret is in this repo. GitHub only stores the code.
+(`menu-cost`, one row per shop). GitHub only stores the code.
+
+**There is no password.** Anyone with the address can see, change or wipe every shop. The welcome page does not
+protect anything. Keep the address private and download backups often.
 
 ## Files
 
 | File | What |
 |------|------|
 | `public/index.html`, `public/app.js`, `public/style.css` | The web page |
-| `worker/worker.js` | API (`/api/*`): family password sign-in, reads/writes D1 |
-| `schema.sql` | D1 tables (`shops`, `login_attempts`) |
+| `worker/worker.js` | API (`/api/*`): reads/writes D1, limits new shops and photo uploads |
+| `schema.sql` | D1 tables (`shops`, `usage_limits`) |
 | `wrangler.toml` | Worker and D1 settings |
 
 ## Setup (one time)
@@ -32,19 +34,12 @@ Needs Node.js. Run these in this folder.
 2. Create the database: `npx wrangler d1 create menu-cost` and paste the `database_id` it prints into `wrangler.toml`.
 3. Create the tables: `npx wrangler d1 execute menu-cost --remote --file schema.sql`
    Step photos: enable R2 in the Cloudflare dashboard, then `npx wrangler r2 bucket create menu-cost-photos`.
-4. Set the family password (you type it; it is never shown or saved in a file):
-   `npx wrangler secret put APP_PASSWORD`. Use something long, e.g. four random words.
-5. Deploy: `npx wrangler deploy`. It prints the address, e.g. `https://menu-cost.<you>.workers.dev`.
-6. Open the address, enter the password, and create your first shop.
+4. Deploy: `npx wrangler deploy`. It prints the address, e.g. `https://menu-cost.<you>.workers.dev`.
+5. Open the address and create your first shop.
 
 ### Family access
 
-Send them the address and the password. Each phone or computer stays signed in for 30 days.
-
-- **Sign out** is on the shop list and in Settings.
-- **To remove someone**, set a new password (`npx wrangler secret put APP_PASSWORD`). Every device is signed
-  out and needs the new password.
-- 5 wrong passwords in 15 minutes from one connection blocks sign-in from it for 15 minutes.
+Send them the address. They can open it straight away.
 
 If two people save the same shop at the same time, the app warns and lets you reload the other person's version instead of overwriting it.
 
