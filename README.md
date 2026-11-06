@@ -9,6 +9,7 @@ A small web app for a restaurant or café to work out the cost, food cost % and 
 - Several shops, each with its own currency (THB or GBP).
 - CSV import/export for ingredients, CSV export for menu costs.
 - "How to make" steps with an optional photo per step, printed as recipe cards (print screen → Save as PDF).
+- SOP tab: shop routines (opening, closing, cleaning) with steps and photos, plus read-only recipes with no prices. Print one routine, all routines, all recipes or the full SOP (print screen → Save as PDF).
 - Optional example data (only loaded when you press the button).
 
 It runs on **Cloudflare**: one Worker serves the page and an API, and the data is stored in a **D1** database

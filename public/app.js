@@ -112,6 +112,7 @@ function emptyShop(name, currency) {
     menus: [],
     extras: [],
     measures: [],
+    sops: [],
   };
 }
 
@@ -120,6 +121,8 @@ function normalizeShop(d) {
   d.ingredients = d.ingredients || [];
   d.menus = d.menus || [];
   d.extras = d.extras || [];
+  d.sops = d.sops || [];
+  for (const r of d.sops) if (!Array.isArray(r.steps)) r.steps = [];
   d.measures = (d.measures || []).filter(m => m && m.name && UNITS[m.unit] && UNITS[m.unit].base !== 'pcs' && m.amount > 0);
   d.currency = CURRENCIES[d.currency] ? d.currency : 'THB';
   if (!Number.isFinite(d.targetCostPct)) d.targetCostPct = 35;
@@ -409,12 +412,17 @@ function cleanSteps(steps) {
     .filter(s => s.text || s.photo);
 }
 
+// The ingredient lines of a menu that have an ingredient and an amount.
+function recipeLines(menu) {
+  return (menu.items || [])
+    .map(l => ({ ing: findIngredient(l.ingredientId), qty: num(l.qty), unit: l.unit }))
+    .filter(l => l.ing && l.qty > 0);
+}
+
 function recipeCardHTML(menu) {
   const d = state.data;
   const portions = menu.yield > 1 ? menu.yield : 1;
-  const lines = (menu.items || [])
-    .map(l => ({ ing: findIngredient(l.ingredientId), qty: num(l.qty), unit: l.unit }))
-    .filter(l => l.ing && l.qty > 0);
+  const lines = recipeLines(menu);
   const steps = menu.steps || [];
   return `<article class="recipe-card">
     <div class="rc-shop">${esc(d.shopName)}</div>
@@ -429,28 +437,57 @@ function recipeCardHTML(menu) {
   </article>`;
 }
 
+// A routine on paper: each step has an empty box to tick by hand.
+function routineCardHTML(sop) {
+  const count = sop.steps.length;
+  return `<article class="recipe-card">
+    <div class="rc-shop">${esc(state.data.shopName)}</div>
+    <h1>${esc(sop.name)}</h1>
+    <div class="rc-meta">${sop.group ? esc(sop.group) + ' · ' : ''}${count} ${count === 1 ? 'step' : 'steps'}</div>
+    <h2>Steps</h2>
+    <ol>${sop.steps.map(s => `<li><span class="rc-box"></span>${esc(s.text)}${s.photo ? `<img src="${esc(photoSrc(s.photo))}" alt="">` : ''}</li>`).join('')}</ol>
+  </article>`;
+}
+
 // Fills a print-only area with the cards, waits for photos, then opens the print screen ("Save as PDF").
-async function printRecipeCards(menus) {
-  if (!menus.length) { toast('No menus to print.'); return; }
+// title becomes the suggested PDF file name.
+async function printCards(cardsHTML, title) {
   let root = $('#print-root');
   if (!root) {
     root = document.createElement('div');
     root.id = 'print-root';
     document.body.appendChild(root);
   }
-  root.innerHTML = menus.map(recipeCardHTML).join('');
+  root.innerHTML = cardsHTML;
   const imgs = $$('img', root);
   if (imgs.length) {
-    toast('Preparing recipe cards…');
+    toast('Preparing to print…');
     const loaded = Promise.all(imgs.map(img => img.complete ? null : new Promise(r => { img.onload = img.onerror = r; })));
     await Promise.race([loaded, new Promise(r => setTimeout(r, 15000))]);
   }
-  // The page title becomes the suggested PDF file name.
   const oldTitle = document.title;
-  document.title = menus.length === 1 ? `${menus[0].name} - recipe card` : `${state.data.shopName} - recipe cards`;
+  document.title = title;
   const done = () => { root.innerHTML = ''; document.title = oldTitle; window.removeEventListener('afterprint', done); };
   window.addEventListener('afterprint', done);
   window.print();
+}
+
+function printRecipeCards(menus) {
+  if (!menus.length) { toast('No menus to print.'); return; }
+  const title = menus.length === 1 ? `${menus[0].name} - recipe card` : `${state.data.shopName} - recipe cards`;
+  return printCards(menus.map(recipeCardHTML).join(''), title);
+}
+
+function printRoutines(sops) {
+  const title = sops.length === 1 ? `${sops[0].name} - routine` : `${state.data.shopName} - routines`;
+  return printCards(sops.map(routineCardHTML).join(''), title);
+}
+
+// Every routine, then every recipe.
+function printFullSop() {
+  const d = state.data;
+  const cards = d.sops.map(routineCardHTML).concat([...d.menus].sort(byName).map(recipeCardHTML));
+  return printCards(cards.join(''), `${d.shopName} - SOP`);
 }
 
 function menusCSV() {
@@ -834,12 +871,13 @@ const TABS = [
   ['home', 'Home', 'Home', '🏠'],
   ['menus', 'Menus', 'Menus', '🥤'],
   ['ingredients', 'Ingredients', 'Ingredients', '🧺'],
+  ['sop', 'SOP', 'SOP', '📋'],
   ['settings', 'Settings', 'Settings', '⚙️'],
 ];
 
 function renderApp() {
   const renderers = {
-    home: renderHome, menus: renderMenus, ingredients: renderIngredients, settings: renderSettings,
+    home: renderHome, menus: renderMenus, ingredients: renderIngredients, sop: renderSop, settings: renderSettings,
   };
   const body = (renderers[state.tab] || renderHome)();
   const tab = renderers[state.tab] ? state.tab : 'home';
@@ -1039,6 +1077,137 @@ function renderIngredients() {
     </table></div>`;
 }
 
+/* SOP tab */
+
+function renderSop() {
+  const d = state.data;
+  const stepCount = n => n ? `${n} ${n === 1 ? 'step' : 'steps'}` : 'No steps yet';
+  const row = (action, id, name, count, tag) => `<li data-action="${action}" data-id="${esc(id)}">
+      <div class="grow"><b>${esc(name)}</b><small>${stepCount(count)}</small></div>
+      ${tag ? `<span class="chip ${chipTint(tag)}">${esc(tag)}</span>` : ''}<span class="muted" aria-hidden="true">›</span></li>`;
+  const menus = [...d.menus].sort(byName).filter(m => matches(m.name + ' ' + (m.category || '')));
+  return `
+    ${d.sops.length || d.menus.length ? `<div class="toolbar"><button class="btn" data-action="print-full-sop">📄 Print full SOP</button></div>` : ''}
+    <section class="card pad sop-section">
+      <div class="sop-head">
+        <div><h2>Shop routines</h2><p class="muted">Opening, closing, cleaning and anything else staff repeat.</p></div>
+        <button class="btn primary" data-action="add-routine">+ Add routine</button>
+      </div>
+      ${d.sops.length ? `<ul class="list">${d.sops.map(r => row('view-routine', r.id, r.name, r.steps.length, r.group)).join('')}</ul>
+      <div><button class="btn" data-action="print-all-routines">📄 Print all routines</button></div>`
+        : `<div class="empty"><span class="empty-emoji small" aria-hidden="true">📋</span><h3>No routines yet</h3><p>Write down how your shop opens and closes, so everyone does it the same way.</p></div>`}
+    </section>
+    <section class="card pad sop-section">
+      <div class="sop-head"><div><h2>Recipes</h2><p class="muted">Every menu appears here automatically. Open one to read it without editing.</p></div></div>
+      ${d.menus.length ? `${searchBox('Search recipes…')}
+      <ul class="list">${menus.map(m => row('view-recipe', m.id, m.name, (m.steps || []).length, m.category)).join('')
+        || `<li class="sop-no-match muted">No recipes match "${esc(state.search)}".</li>`}</ul>
+      <div><button class="btn" data-action="print-all-cards">📄 Print all recipes</button></div>`
+        : '<p class="muted read-empty">No menus yet. Add one in the Menus tab and its recipe appears here.</p>'}
+    </section>`;
+}
+
+// Read-only routine. Ticks are only for now: they are gone when this closes.
+function routineView(sop) {
+  const total = sop.steps.length;
+  openModal({
+    title: sop.name,
+    body: `<div class="read-title">${sop.group ? `<span class="chip ${chipTint(sop.group)}">${esc(sop.group)}</span>` : ''}
+        <span class="pill warn read-progress" id="read-progress">0 of ${total} done</span></div>
+      <ol class="read-steps">${sop.steps.map((s, i) => `<li><label class="read-step read-check">
+        <input type="checkbox" aria-label="Done: step ${i + 1}">
+        <span class="read-text"><span>${i + 1}. ${esc(s.text)}</span>${s.photo ? `<img class="read-photo" src="${esc(photoSrc(s.photo))}" alt="Step ${i + 1} photo" loading="lazy">` : ''}</span>
+      </label></li>`).join('')}</ol>
+      <p class="muted read-note">Ticks are only for now. They clear when you leave this page and are not saved.</p>`,
+    buttons: [
+      { label: 'Edit', className: 'left', onClick: () => { setTimeout(() => routineModal(sop), 0); } },
+      { label: '📄 Print', onClick: () => { printRoutines([sop]); return true; } },
+      { label: 'Close', className: 'primary' },
+    ],
+    onOpen: modal => {
+      modal.addEventListener('change', () => {
+        const done = $$('input[type=checkbox]:checked', modal).length;
+        const p = $('#read-progress', modal);
+        p.textContent = `${done} of ${total} done`;
+        p.className = `pill ${done === total ? 'ok' : 'warn'} read-progress`;
+      });
+    },
+  });
+}
+
+// Read-only recipe with no prices, so staff can follow it without opening the editor.
+function recipeView(menu) {
+  const portions = menu.yield > 1 ? menu.yield : 1;
+  const lines = recipeLines(menu);
+  const steps = menu.steps || [];
+  openModal({
+    title: menu.name,
+    body: `<div class="read-title">${menu.category ? `<span class="chip ${chipTint(menu.category)}">${esc(menu.category)}</span>` : ''}
+        <span class="muted">Makes ${portions} ${portions === 1 ? 'portion' : 'portions'}</span></div>
+      <h3 class="read-h">Ingredients</h3>
+      ${lines.length ? `<table class="read-ingredients"><tbody>${lines.map(l => `<tr><td>${esc(l.ing.name)}</td><td>${fmtNum(l.qty)} ${esc(l.unit)}</td></tr>`).join('')}</tbody></table>`
+        : '<p class="read-empty muted">No ingredients yet.</p>'}
+      <h3 class="read-h">How to make</h3>
+      ${steps.length ? `<ol class="read-steps">${steps.map((s, i) => `<li class="read-step"><span class="step-no">${i + 1}</span>
+        <span class="read-text"><span>${esc(s.text)}</span>${s.photo ? `<img class="read-photo" src="${esc(photoSrc(s.photo))}" alt="Step ${i + 1} photo" loading="lazy">` : ''}</span></li>`).join('')}</ol>`
+        : '<p class="read-empty muted">No steps written yet. Press Edit menu to add them.</p>'}`,
+    buttons: [
+      { label: 'Edit menu', className: 'left', onClick: () => { setTimeout(() => menuModal(menu), 0); } },
+      { label: '📄 Recipe card', onClick: () => { printRecipeCards([menu]); return true; } },
+      { label: 'Close', className: 'primary' },
+    ],
+  });
+}
+
+function routineModal(sop) {
+  const d = state.data;
+  // Edit a copy so Cancel throws changes away.
+  const draft = structuredClone(sop || { id: uid('sop'), name: '', group: '', steps: [{ text: '' }] });
+  const steps = stepEditor(() => draft.steps);
+  const groups = [...new Set(d.sops.map(r => r.group).filter(Boolean))].sort();
+  openModal({
+    title: sop ? 'Edit routine' : 'Add routine',
+    body: `<div class="row">
+        <label class="field"><span>Routine name</span><input type="text" id="routine-name" value="${esc(draft.name)}" maxlength="80" placeholder="e.g. Opening the shop"></label>
+        <label class="field"><span>Group (optional)</span><input type="text" id="routine-group" value="${esc(draft.group || '')}" list="routine-groups" maxlength="40" placeholder="e.g. Daily"></label>
+      </div>
+      <datalist id="routine-groups">${groups.map(g => `<option value="${esc(g)}">`).join('')}</datalist>
+      <h3 class="ed-h">Steps</h3>
+      <ol class="steps" id="steps"></ol>
+      <button class="btn small" type="button" id="add-step">+ Add step</button>
+      <p class="hint" style="margin-top:6px">One action per step. A photo is optional.</p>
+      <input type="file" id="step-photo-input" accept="image/*" hidden>
+      <p class="error-text" id="routine-error" role="alert"></p>`,
+    buttons: [
+      ...(sop ? [{ label: 'Delete', className: 'danger left', onClick: () => {
+        confirmModal('Delete routine?', `Delete <b>${esc(sop.name)}</b>? This cannot be undone.`, 'Delete', () => mutate(dd => { dd.sops = dd.sops.filter(r => r.id !== sop.id); }));
+        return true;
+      } }] : []),
+      { label: 'Cancel' },
+      { label: 'Save routine', className: 'primary', onClick: modal => {
+        const error = $('#routine-error', modal);
+        const nameInput = $('#routine-name', modal);
+        const name = nameInput.value.trim();
+        const clean = cleanSteps(draft.steps);
+        const problem = !name ? 'Give this routine a name.'
+          : d.sops.some(r => r.id !== draft.id && r.name.toLowerCase() === name.toLowerCase()) ? 'A routine with this name already exists.'
+          : !clean.length ? 'Add at least one step.'
+          : steps.uploading() ? 'Wait for the photos to finish uploading.' : '';
+        error.textContent = problem;
+        nameInput.classList.toggle('error', !name);
+        if (problem) return true;
+        const saved = { id: draft.id, name, group: $('#routine-group', modal).value.trim(), steps: clean };
+        mutate(dd => {
+          const i = dd.sops.findIndex(r => r.id === saved.id);
+          if (i >= 0) dd.sops[i] = saved; else dd.sops.push(saved);
+        });
+        toast('Routine saved', 'ok');
+      } },
+    ],
+    onOpen: modal => steps.bind(modal, $('#routine-error', modal)),
+  });
+}
+
 /* Settings tab */
 
 // Where a measurement is used: menu lines and ingredients bought in it.
@@ -1133,7 +1302,7 @@ function openModal({ title, body, buttons = [], wide = false, onOpen, onClose })
   });
   onOpen?.(modal);
   // On touch screens, focusing would pop up the keyboard and hide the form.
-  const first = $('input, select', modal);
+  const first = $('input:not([type=checkbox]), select', modal);
   if (first && !matchMedia('(pointer: coarse)').matches) first.focus();
   return modal;
 }
@@ -1432,6 +1601,83 @@ function measureModal(m) {
 }
 
 // draftIn: reopen with unsaved edits (e.g. after fixing an ingredient's size from a menu line).
+// The step list used by the menu and routine editors. The page must contain #steps, #add-step and #step-photo-input.
+// getSteps: returns the draft's current list of steps.
+function stepEditor(getSteps) {
+  // Upload progress per step, kept out of the saved data.
+  const stepState = new WeakMap();
+
+  const stepRow = (step, idx, all) => {
+    const st = stepState.get(step) || {};
+    const last = idx === all.length - 1;
+    let photo;
+    if (st.uploading) photo = '<div class="step-thumb loading">Uploading…</div>';
+    else if (step.photo) photo = `<div class="step-thumb"><button type="button" class="thumb-btn" data-step-act="photo" aria-label="Change photo"><img src="${esc(photoSrc(step.photo))}" alt="Step ${idx + 1} photo"></button>
+      <button type="button" class="thumb-x" data-step-act="rm-photo" aria-label="Remove photo">✕</button></div>`;
+    else photo = '<button type="button" class="btn small" data-step-act="photo">Add photo</button>';
+    return `<li class="step" data-step="${idx}">
+      <span class="step-no">${idx + 1}</span>
+      <textarea data-step-text rows="2" maxlength="500" placeholder="What to do in this step">${esc(step.text || '')}</textarea>
+      <div class="step-tools">
+        <button type="button" class="btn link" data-step-act="up" aria-label="Move step up" ${idx === 0 ? 'disabled' : ''}>↑</button>
+        <button type="button" class="btn link" data-step-act="down" aria-label="Move step down" ${last ? 'disabled' : ''}>↓</button>
+        <button type="button" class="btn link" data-step-act="del" aria-label="Delete step">✕</button>
+      </div>
+      <div class="step-photo">${photo}${st.error ? `<span class="error-text">${esc(st.error)}</span>` : ''}</div>
+    </li>`;
+  };
+
+  return {
+    uploading: () => getSteps().some(s => stepState.get(s)?.uploading),
+    bind(modal, errorEl) {
+      const stepsEl = $('#steps', modal);
+      const fileInput = $('#step-photo-input', modal);
+      let photoTarget = null;
+      const drawSteps = () => { stepsEl.innerHTML = getSteps().map(stepRow).join(''); };
+      stepsEl.addEventListener('input', e => {
+        if (!e.target.matches('[data-step-text]')) return;
+        e.stopPropagation(); // step text does not change costs
+        getSteps()[+e.target.closest('[data-step]').dataset.step].text = e.target.value;
+      });
+      stepsEl.addEventListener('click', e => {
+        const btn = e.target.closest('[data-step-act]');
+        if (!btn) return;
+        const i = +btn.closest('[data-step]').dataset.step;
+        const act = btn.dataset.stepAct;
+        const s = getSteps();
+        if (act === 'up' && i > 0) [s[i - 1], s[i]] = [s[i], s[i - 1]];
+        else if (act === 'down' && i < s.length - 1) [s[i + 1], s[i]] = [s[i], s[i + 1]];
+        else if (act === 'del') s.splice(i, 1);
+        else if (act === 'rm-photo') delete s[i].photo;
+        else if (act === 'photo') { photoTarget = s[i]; fileInput.value = ''; fileInput.click(); return; }
+        drawSteps();
+      });
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files[0];
+        const step = photoTarget;
+        photoTarget = null;
+        if (!file || !step) return;
+        stepState.set(step, { uploading: true });
+        errorEl.textContent = '';
+        drawSteps();
+        try {
+          step.photo = await uploadStepPhoto(file);
+          stepState.delete(step);
+        } catch (err) {
+          stepState.set(step, { error: err.message });
+        }
+        if (stepsEl.isConnected) drawSteps();
+      });
+      $('#add-step', modal).onclick = () => {
+        getSteps().push({ text: '' });
+        drawSteps();
+        $('#steps li:last-child textarea', modal).focus();
+      };
+      drawSteps();
+    },
+  };
+}
+
 function menuModal(menu, draftIn = null) {
   const d = state.data;
   if (!d.ingredients.length) {
@@ -1442,9 +1688,8 @@ function menuModal(menu, draftIn = null) {
   // Edit a copy so Cancel throws changes away.
   const draft = draftIn || structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, items: [], steps: [] });
   draft.steps = draft.steps || [];
-  // Upload progress per step, kept out of the saved data.
-  const stepState = new WeakMap();
-  const uploading = () => draft.steps.some(s => stepState.get(s)?.uploading);
+  const stepList = stepEditor(() => draft.steps);
+  const uploading = stepList.uploading;
   if (!draft.items.length) draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
   const ingredients = [...d.ingredients].sort(byName);
   const categories = [...new Set(d.menus.map(m => m.category).filter(Boolean))].sort();
@@ -1464,26 +1709,6 @@ function menuModal(menu, draftIn = null) {
       <td class="rm"><button class="btn link" type="button" data-remove="${idx}" aria-label="Remove">✕</button></td>
     </tr>${base === 'pcs' ? `<tr class="line-hint"><td colspan="5">${esc(ing.name)} is bought by the piece.
       <button type="button" class="btn link" data-set-size="${esc(ing.id)}">Set its size</button> to use ml or g.</td></tr>` : ''}`;
-  };
-
-  const stepRow = (step, idx) => {
-    const st = stepState.get(step) || {};
-    const last = idx === draft.steps.length - 1;
-    let photo;
-    if (st.uploading) photo = '<div class="step-thumb loading">Uploading…</div>';
-    else if (step.photo) photo = `<div class="step-thumb"><button type="button" class="thumb-btn" data-step-act="photo" aria-label="Change photo"><img src="${esc(photoSrc(step.photo))}" alt="Step ${idx + 1} photo"></button>
-      <button type="button" class="thumb-x" data-step-act="rm-photo" aria-label="Remove photo">✕</button></div>`;
-    else photo = '<button type="button" class="btn small" data-step-act="photo">Add photo</button>';
-    return `<li class="step" data-step="${idx}">
-      <span class="step-no">${idx + 1}</span>
-      <textarea data-step-text rows="2" maxlength="500" placeholder="What to do in this step">${esc(step.text || '')}</textarea>
-      <div class="step-tools">
-        <button type="button" class="btn link" data-step-act="up" aria-label="Move step up" ${idx === 0 ? 'disabled' : ''}>↑</button>
-        <button type="button" class="btn link" data-step-act="down" aria-label="Move step down" ${last ? 'disabled' : ''}>↓</button>
-        <button type="button" class="btn link" data-step-act="del" aria-label="Delete step">✕</button>
-      </div>
-      <div class="step-photo">${photo}${st.error ? `<span class="error-text">${esc(st.error)}</span>` : ''}</div>
-    </li>`;
   };
 
   // Targets typed in the price planner are a try-out: they are not saved with the menu.
@@ -1749,51 +1974,7 @@ function menuModal(menu, draftIn = null) {
         if (!draft.items.length) draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
         drawLines(); drawSummary();
       });
-      // How to make: step list with optional photo per step.
-      const stepsEl = $('#steps', modal);
-      const fileInput = $('#step-photo-input', modal);
-      let photoTarget = null;
-      const drawSteps = () => { stepsEl.innerHTML = draft.steps.map(stepRow).join(''); };
-      stepsEl.addEventListener('input', e => {
-        if (!e.target.matches('[data-step-text]')) return;
-        e.stopPropagation(); // step text does not change costs
-        draft.steps[+e.target.closest('[data-step]').dataset.step].text = e.target.value;
-      });
-      stepsEl.addEventListener('click', e => {
-        const btn = e.target.closest('[data-step-act]');
-        if (!btn) return;
-        const i = +btn.closest('[data-step]').dataset.step;
-        const act = btn.dataset.stepAct;
-        const s = draft.steps;
-        if (act === 'up' && i > 0) [s[i - 1], s[i]] = [s[i], s[i - 1]];
-        else if (act === 'down' && i < s.length - 1) [s[i + 1], s[i]] = [s[i], s[i + 1]];
-        else if (act === 'del') s.splice(i, 1);
-        else if (act === 'rm-photo') delete s[i].photo;
-        else if (act === 'photo') { photoTarget = s[i]; fileInput.value = ''; fileInput.click(); return; }
-        drawSteps();
-      });
-      fileInput.addEventListener('change', async () => {
-        const file = fileInput.files[0];
-        const step = photoTarget;
-        photoTarget = null;
-        if (!file || !step) return;
-        stepState.set(step, { uploading: true });
-        $('#menu-error', modal).textContent = '';
-        drawSteps();
-        try {
-          step.photo = await uploadStepPhoto(file);
-          stepState.delete(step);
-        } catch (err) {
-          stepState.set(step, { error: err.message });
-        }
-        if (stepsEl.isConnected) drawSteps();
-      });
-      $('#add-step', modal).onclick = () => {
-        draft.steps.push({ text: '' });
-        drawSteps();
-        $('#steps li:last-child textarea', modal).focus();
-      };
-      drawSteps();
+      stepList.bind(modal, $('#menu-error', modal));
 
       $('#add-line', modal).onclick = () => {
         draft.items.push({ ingredientId: '', qty: '', unit: 'g' });
@@ -1891,6 +2072,11 @@ const ACTIONS = {
   'export-ingredients': () => download(`${state.data.shopName} - ingredients.csv`, ingredientsCSV()),
   'export-menus': () => download(`${state.data.shopName} - menu costs.csv`, menusCSV()),
   'print-all-cards': () => printRecipeCards([...state.data.menus].sort(byName)),
+  'print-all-routines': () => printRoutines(state.data.sops),
+  'print-full-sop': printFullSop,
+  'add-routine': () => routineModal(null),
+  'view-routine': el => routineView(state.data.sops.find(r => r.id === el.dataset.id)),
+  'view-recipe': el => recipeView(state.data.menus.find(m => m.id === el.dataset.id)),
   'download-backup': () => download(`${state.data.shopName} - backup.json`, JSON.stringify(state.data, null, 2), 'application/json'),
   'load-examples': () => confirmModal('Load example data?',
     `Adds sample ${esc(state.data.currency)} ingredients and menus, marked “example”. You can remove them any time in Settings → Clear example data.`,
