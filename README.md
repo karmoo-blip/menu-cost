@@ -3,8 +3,9 @@
 A small web app for a restaurant or café to work out the cost, food cost % and profit of every menu item.
 
 - Add ingredients (buy price + pack size), build menus from them, see cost per plate.
-- Extra costs (wages, gas, rent) as % of sell price or a fixed amount per plate. Each menu can tick which extras it uses.
-- Break-even price (lowest price that covers ingredients and all extra costs) and profit % left at your sell price.
+- Estimated profit: sell price − ingredients − your labor & overhead target %.
+- Break-even price: where estimated profit reaches zero.
+- Price planner on each menu: suggested price from your food cost target, a price slider, 3.33× / 4× / 5× quick prices, and a breakdown of food, labor & overhead and profit.
 - Several shops, each with its own currency (THB or GBP).
 - CSV import/export for ingredients, CSV export for menu costs.
 - "How to make" steps with an optional photo per step, printed as recipe cards (print screen → Save as PDF).

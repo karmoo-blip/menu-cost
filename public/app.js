@@ -106,7 +106,8 @@ function emptyShop(name, currency) {
     version: DATA_VERSION,
     shopName: name,
     currency,
-    targetCostPct: 35,
+    targetCostPct: 30,
+    laborPct: 45,
     ingredients: [],
     menus: [],
     extras: [],
@@ -122,6 +123,7 @@ function normalizeShop(d) {
   d.measures = (d.measures || []).filter(m => m && m.name && UNITS[m.unit] && UNITS[m.unit].base !== 'pcs' && m.amount > 0);
   d.currency = CURRENCIES[d.currency] ? d.currency : 'THB';
   if (!Number.isFinite(d.targetCostPct)) d.targetCostPct = 35;
+  if (!Number.isFinite(d.laborPct)) d.laborPct = 45;
   for (const m of d.menus) if (!Array.isArray(m.steps)) m.steps = [];
   tidyMenuExtras(d);
   return d;
@@ -137,10 +139,6 @@ function tidyMenuExtras(d) {
     m.excludedExtras = (m.excludedExtras || []).filter(id => ids.has(id));
   }
 }
-function menuUsesExtra(menu, extraId) {
-  return !(menu.excludedExtras || []).includes(extraId);
-}
-
 function findIngredient(id) {
   return state.data.ingredients.find(i => i.id === id);
 }
@@ -164,7 +162,8 @@ function menusUsing(ingredientId) {
   return state.data.menus.filter(m => m.items.some(l => l.ingredientId === ingredientId));
 }
 
-function calcMenu(menu) {
+// tryTargetPct / tryLaborPct: targets to try out instead of the shop's saved ones.
+function calcMenu(menu, tryTargetPct, tryLaborPct) {
   const data = state.data;
   const portions = menu.yield > 0 ? menu.yield : 1;
   let batchCost = 0;
@@ -175,38 +174,31 @@ function calcMenu(menu) {
   }
   const ingredientCost = batchCost / portions;
   const price = num(menu.sellPrice);
-  let extrasCost = 0;
-  let pctExtras = 0;   // sum of "% of sell price" extras, as a fraction
-  let fixedExtras = 0; // sum of "fixed per plate" extras
-  const extrasLines = [];
-  for (const ex of data.extras) {
-    if (!menuUsesExtra(menu, ex.id)) continue;
-    const amount = ex.type === 'percent'
-      ? (Number.isFinite(price) ? price * ex.value / 100 : 0)
-      : ex.value;
-    if (ex.type === 'percent') pctExtras += ex.value / 100; else fixedExtras += ex.value;
-    extrasCost += amount;
-    extrasLines.push({ name: ex.name, amount, ex });
-  }
-  const totalCost = ingredientCost + extrasCost;
   const hasPrice = Number.isFinite(price) && price > 0;
   const foodCostPct = hasPrice ? ingredientCost / price : NaN;
+  // Labor & overhead is an estimate from the shop's target. Any extra costs saved by older versions are not counted.
+  const laborPct = tryLaborPct >= 0 ? tryLaborPct : data.laborPct;
+  const laborCost = hasPrice ? price * laborPct / 100 : NaN;
+  const totalCost = ingredientCost + (hasPrice ? laborCost : 0);
   const profit = hasPrice ? price - totalCost : NaN;
-  // Lowest price that covers ingredients and all extras. None exists if % extras reach 100%.
-  const breakEvenOk = pctExtras < 1;
-  const breakEvenPrice = breakEvenOk ? (ingredientCost + fixedExtras) / (1 - pctExtras) : NaN;
-  const target = data.targetCostPct / 100;
+  // Price where estimated profit reaches zero. None exists if labor reaches 100%.
+  const breakEvenPrice = laborPct < 100 ? ingredientCost / (1 - laborPct / 100) : NaN;
+  const targetPct = tryTargetPct > 0 ? tryTargetPct : data.targetCostPct;
+  const target = targetPct / 100;
+  // Price that makes food cost exactly the target.
+  const targetPrice = ingredientCost > 0 ? ingredientCost / target : NaN;
   let status = 'none';
   if (hasPrice && menu.items.length) {
     status = foodCostPct <= target ? 'ok' : foodCostPct <= target + 0.1 ? 'warn' : 'bad';
   }
   return {
-    portions, batchCost, ingredientCost, extrasCost, extrasLines, totalCost,
+    portions, batchCost, ingredientCost, laborPct, laborCost, totalCost,
     foodCostPct,
     totalCostPct: hasPrice ? totalCost / price : NaN,
     profit,
     profitPct: hasPrice ? profit / price : NaN,
-    breakEvenPrice, breakEvenOk,
+    breakEvenPrice,
+    targetPct, targetPrice,
     status, problems,
   };
 }
@@ -220,11 +212,11 @@ function statusPill(c) {
 // Food cost bar: fill = food cost %, line = target. The bar runs from 0 to twice the target.
 function costMeter(c) {
   if (c.status === 'none') return '';
-  const target = state.data.targetCostPct / 100;
+  const target = c.targetPct / 100;
   const scale = Math.min(target * 2, 1);
   const fill = Math.max(0, Math.min(c.foodCostPct / scale, 1)) * 100;
   const mark = Math.min(target / scale, 1) * 100;
-  return `<div class="meter ${c.status}" role="img" aria-label="Food cost ${pct(c.foodCostPct)}, target ${state.data.targetCostPct}%">
+  return `<div class="meter ${c.status}" role="img" aria-label="Food cost ${pct(c.foodCostPct)}, target ${fmtNum(c.targetPct)}%">
     <i style="width:${fill.toFixed(1)}%"></i><span class="meter-target" style="left:${mark.toFixed(1)}%"></span></div>`;
 }
 
@@ -256,7 +248,6 @@ const EXAMPLES = {
       ['Iced Matcha Latte', 'Tea', 80, [['Matcha powder', 4, 'g'], ['Fresh milk', 180, 'ml'], ['Sugar syrup', 15, 'ml'], ['Ice', 150, 'g'], ['Plastic cup 16oz', 1, 'pcs'], ['Lid + straw', 1, 'pcs']]],
       ['Butter Croissant', 'Bakery', 55, [['Frozen croissant', 1, 'pcs']]],
     ],
-    extras: [['Staff wages', 'percent', 15], ['Gas & electric', 'fixed', 2]],
   },
   GBP: {
     ingredients: [
@@ -275,7 +266,6 @@ const EXAMPLES = {
       ['Vanilla Matcha Latte', 'Tea', 4.2, [['Matcha powder', 4, 'g'], ['Whole milk', 220, 'ml'], ['Vanilla syrup', 15, 'ml'], ['Takeaway cup 12oz', 1, 'pcs'], ['Lid', 1, 'pcs']]],
       ['Butter Croissant', 'Bakery', 3.2, [['Frozen croissant', 1, 'pcs']]],
     ],
-    extras: [['Staff wages', 'percent', 15], ['Gas & electric', 'fixed', 0.1]],
   },
 };
 
@@ -294,15 +284,11 @@ function loadExampleData() {
   for (const [name, category, sellPrice, items] of ex.menus) {
     if (d.menus.some(m => m.name.toLowerCase() === name.toLowerCase())) continue;
     d.menus.push({
-      id: uid('menu'), name, category, sellPrice, yield: 1, excludedExtras: [], example: true,
+      id: uid('menu'), name, category, sellPrice, yield: 1, example: true,
       items: items
         .filter(([n, , unit]) => unitInfo(ids[n].unit).base === unitInfo(unit).base)
         .map(([n, qty, unit]) => ({ ingredientId: ids[n].id, qty, unit })),
     });
-  }
-  for (const [name, type, value] of ex.extras) {
-    if (d.extras.some(e => e.name.toLowerCase() === name.toLowerCase())) continue;
-    d.extras.push({ id: uid('ex'), name, type, value, example: true });
   }
 }
 
@@ -471,11 +457,11 @@ function menusCSV() {
   const rows = [...state.data.menus].sort(byName).map(m => {
     const c = calcMenu(m);
     const r = v => Number.isFinite(v) ? v.toFixed(2) : '';
-    return [m.name, m.category || '', r(num(m.sellPrice)), r(c.ingredientCost), r(c.extrasCost), r(c.totalCost),
+    return [m.name, m.category || '', r(num(m.sellPrice)), r(c.ingredientCost), r(c.laborCost), r(c.totalCost),
       Number.isFinite(c.foodCostPct) ? (c.foodCostPct * 100).toFixed(1) : '', r(c.profit),
       Number.isFinite(c.profitPct) ? (c.profitPct * 100).toFixed(1) : '', r(c.breakEvenPrice)];
   });
-  return toCSV([['menu', 'category', 'sell_price', 'ingredient_cost', 'extras_cost', 'total_cost', 'food_cost_pct', 'profit', 'profit_pct', 'break_even_price'], ...rows]);
+  return toCSV([['menu', 'category', 'sell_price', 'ingredient_cost', 'labor_estimate', 'total_cost', 'food_cost_pct', 'profit', 'profit_pct', 'break_even_price'], ...rows]);
 }
 
 /* ---------- storage: this browser only ---------- */
@@ -913,13 +899,12 @@ const TABS = [
   ['home', 'Home', 'Home', '🏠'],
   ['menus', 'Menus', 'Menus', '🥤'],
   ['ingredients', 'Ingredients', 'Ingredients', '🧺'],
-  ['extras', 'Extra costs', 'Extras', '💡'],
   ['settings', 'Settings', 'Settings', '⚙️'],
 ];
 
 function renderApp() {
   const renderers = {
-    home: renderHome, menus: renderMenus, ingredients: renderIngredients, extras: renderExtras, settings: renderSettings,
+    home: renderHome, menus: renderMenus, ingredients: renderIngredients, settings: renderSettings,
   };
   const body = (renderers[state.tab] || renderHome)();
   const tab = renderers[state.tab] ? state.tab : 'home';
@@ -980,9 +965,8 @@ function renderHome() {
     const steps = [
       [d.ingredients.length > 0, 'Add ingredients', d.ingredients.length ? `${d.ingredients.length} added` : 'What you buy, its price and pack size', 'add-ingredient', '+ Ingredient'],
       [false, 'Build your first menu', 'Pick ingredients and how much one plate uses', 'add-menu', '+ Menu'],
-      [d.extras.length > 0, 'Add extra costs', d.extras.length ? `${d.extras.length} added` : 'Wages, gas, rent. Optional', 'add-extra', '+ Extra cost'],
     ];
-    return `${head}<p class="muted">Three small steps and you will see what every menu really costs.</p></div>
+    return `${head}<p class="muted">Two small steps and you will see what every menu really costs.</p></div>
       <ol class="onboard">${steps.map(([done, title, sub, action, label], i) => `
         <li class="${done ? 'done' : ''}">
           <span class="onboard-no" aria-hidden="true">${done ? '✓' : i + 1}</span>
@@ -1023,7 +1007,7 @@ function renderHome() {
         <h2>🏆 Best earners per plate</h2>
         ${best.length ? `<ul class="list">${best.map((x, i) => `
           <li data-action="edit-menu" data-id="${esc(x.m.id)}"><span class="rank" aria-label="Number ${i + 1}">${i + 1}</span>
-            <div class="grow"><b>${esc(x.m.name)}</b><small>${pct(x.c.profitPct)} profit</small></div>
+            <div class="grow"><b>${esc(x.m.name)}</b><small>${pct(x.c.profitPct)} est. profit</small></div>
             <b class="money ${x.c.profit < 0 ? 'neg' : ''}">${money(x.c.profit)}</b></li>`).join('')}</ul>`
           : '<p class="muted list-empty">Add sell prices to see profit.</p>'}
       </section>
@@ -1048,9 +1032,9 @@ function menuCard(m) {
     <div class="mc-nums">
       <div><span>Sell</span><b>${money(num(m.sellPrice))}</b></div>
       <div><span>Cost</span><b>${money(c.ingredientCost)}</b></div>
-      <div class="mc-profit ${c.profit < 0 ? 'neg' : ''}"><span>Profit</span><b>${money(c.profit)}</b></div>
+      <div class="mc-profit ${c.profit < 0 ? 'neg' : ''}"><span>Est. profit</span><b>${money(c.profit)}</b></div>
     </div>
-    ${c.extrasCost ? `<div class="mc-foot muted">+ ${money(c.extrasCost)} extras · break-even ${money(c.breakEvenPrice)}</div>` : `<div class="mc-foot muted">Break-even ${money(c.breakEvenPrice)}</div>`}
+    <div class="mc-foot muted">Break-even ${money(c.breakEvenPrice)}</div>
   </button>`;
 }
 
@@ -1083,7 +1067,7 @@ function renderMenus() {
     </div>` : ''}
     ${menus.length ? `<div class="menu-grid">${menus.map(menuCard).join('')}</div>`
       : `<div class="card empty"><span class="empty-emoji" aria-hidden="true">🔍</span><p>No menus match${state.search ? ` "${esc(state.search)}"` : ''}${cat ? ` in ${esc(cat)}` : ''}.</p></div>`}
-    <p class="footnote muted">The bar shows food cost; the dark line is your ${d.targetCostPct}% target. Food cost = ingredients ÷ sell price. Profit = sell price − ingredients − extra costs. Break-even = lowest price that covers ingredients and all extra costs.</p>`;
+    <p class="footnote muted">The bar shows food cost; the dark line is your ${d.targetCostPct}% target. Food cost = ingredients ÷ sell price. Est. profit = sell price − ingredients − your ${fmtNum(d.laborPct)}% labor &amp; overhead target. Break-even = price where est. profit reaches zero.</p>`;
 }
 
 /* Ingredients tab */
@@ -1117,32 +1101,6 @@ function renderIngredients() {
           <td class="num muted c-used">${used ? `<span class="phone-only">Used in </span>${used}${used === 1 ? ' menu' : ' menus'}` : '<span class="wide-only">—</span><span class="phone-only">Not used yet</span>'}</td>
         </tr>`;
       }).join('') || `<tr><td colspan="5" class="muted no-match">No ingredients match "${esc(state.search)}".</td></tr>`}</tbody>
-    </table></div>`;
-}
-
-/* Extras tab */
-
-function renderExtras() {
-  const d = state.data;
-  const intro = `<p class="muted intro">Extra costs like staff wages, gas, electric or rent. They are added to every menu (untick one in a menu's editor to leave it out of that menu).
-    Use <b>% of sell price</b> for costs that grow with sales, or <b>fixed per plate</b> for a set amount.</p>`;
-  if (!d.extras.length) {
-    return intro + `<div class="card empty"><span class="empty-emoji" aria-hidden="true">💡</span><h3>No extra costs yet</h3><p>Without extras, profit only takes away ingredients and packaging.</p>
-      <div class="toolbar"><button class="btn primary" data-action="add-extra">+ Add extra cost</button></div></div>`;
-  }
-  return intro + `
-    <div class="toolbar"><button class="btn primary" data-action="add-extra">+ Add extra cost</button></div>
-    <div class="card table-wrap"><table class="rtable extras-table">
-      <thead><tr><th>Name</th><th>Type</th><th class="num">Amount</th><th class="num">Used in</th></tr></thead>
-      <tbody>${d.extras.map(e => {
-        const used = d.menus.filter(m => menuUsesExtra(m, e.id)).length;
-        return `<tr class="clickable" data-action="edit-extra" data-id="${esc(e.id)}">
-        <td class="c-name"><b>${esc(e.name)}</b>${e.example ? '<span class="chip">example</span>' : ''}</td>
-        <td class="c-type"><span class="chip ${e.type === 'percent' ? 'tint-lav' : 'tint-sky'}">${e.type === 'percent' ? '% of sell price' : 'Fixed per plate'}</span></td>
-        <td class="num c-amount">${e.type === 'percent' ? fmtNum(e.value) + '%' : money(e.value)}</td>
-        <td class="num muted c-used">${used ? `${used} of ${d.menus.length} menus` : 'Not used'}</td>
-      </tr>`;
-      }).join('')}</tbody>
     </table></div>`;
 }
 
@@ -1194,6 +1152,8 @@ function renderSettings() {
         <p class="hint">Changing currency only changes the symbol. Prices are not converted.</p>
         <label class="field"><span>Target food cost %</span><input type="number" name="targetCostPct" value="${d.targetCostPct}" min="1" max="100" step="0.5" required></label>
         <p class="hint">Cafés often aim for 25–35%. Menus above this show as “High”.</p>
+        <label class="field"><span>Target labor &amp; overhead %</span><input type="number" name="laborPct" value="${d.laborPct}" min="0" max="100" step="0.5" required></label>
+        <p class="hint">Wages, rent, gas and everything else that is not ingredients. Used for est. profit on every menu. Net profit target is what is left: 100% − food cost − labor &amp; overhead.</p>
         <button class="btn primary" type="submit">Save settings</button>
       </form>
     </section>
@@ -1537,44 +1497,6 @@ function measureModal(m) {
   });
 }
 
-function extraModal(ex) {
-  const isNew = !ex;
-  ex = ex || { name: '', type: 'percent', value: '' };
-  openModal({
-    title: isNew ? 'Add extra cost' : 'Edit extra cost',
-    body: `<form id="extra-form">
-      <label class="field"><span>Name</span><input type="text" name="name" value="${esc(ex.name)}" maxlength="60" placeholder="e.g. Staff wages, Rent, Gas" required></label>
-      <div class="row">
-        <label class="field"><span>Type</span><select name="type">
-          <option value="percent" ${ex.type === 'percent' ? 'selected' : ''}>% of sell price</option>
-          <option value="fixed" ${ex.type === 'fixed' ? 'selected' : ''}>Fixed per plate (${esc(state.data.currency)})</option>
-        </select></label>
-        <label class="field"><span>Amount</span><input type="number" name="value" value="${esc(ex.value)}" min="0" step="any" required></label>
-      </div>
-      <p class="hint">Tip: monthly wages ÷ monthly sales = % of sell price. Monthly gas ÷ plates sold = fixed per plate.</p>
-    </form>`,
-    buttons: [
-      ...(isNew ? [] : [{ label: 'Delete', className: 'danger left', onClick: () => mutate(d => { d.extras = d.extras.filter(e => e.id !== ex.id); tidyMenuExtras(d); }) }]),
-      { label: 'Cancel' },
-      { label: 'Save', className: 'primary', onClick: () => {
-        const f = $('#extra-form');
-        if (!f.reportValidity()) return true;
-        const v = Object.fromEntries(new FormData(f));
-        mutate(d => {
-          const fields = { name: v.name.trim(), type: v.type, value: num(v.value) };
-          if (isNew) d.extras.push({ id: uid('ex'), ...fields });
-          else {
-            const target = d.extras.find(e => e.id === ex.id);
-            Object.assign(target, fields);
-            delete target.example;
-          }
-        });
-      } },
-    ],
-    onOpen: modal => $('#extra-form', modal).addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); }),
-  });
-}
-
 // draftIn: reopen with unsaved edits (e.g. after fixing an ingredient's size from a menu line).
 function menuModal(menu, draftIn = null) {
   const d = state.data;
@@ -1584,8 +1506,7 @@ function menuModal(menu, draftIn = null) {
   }
   const isNew = !menu;
   // Edit a copy so Cancel throws changes away.
-  const draft = draftIn || structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, excludedExtras: [], items: [], steps: [] });
-  draft.excludedExtras = draft.excludedExtras || [];
+  const draft = draftIn || structuredClone(menu || { id: uid('menu'), name: '', category: '', sellPrice: '', yield: 1, items: [], steps: [] });
   draft.steps = draft.steps || [];
   // Upload progress per step, kept out of the saved data.
   const stepState = new WeakMap();
@@ -1631,27 +1552,65 @@ function menuModal(menu, draftIn = null) {
     </li>`;
   };
 
+  // Targets typed in the price planner are a try-out: they are not saved with the menu.
+  const plan = { food: d.targetCostPct, labor: d.laborPct, startPrice: num(draft.sellPrice) || 0 };
+
+  const planHTML = `<section class="plan" aria-label="Price planner">
+      <h3 class="ed-h">🧮 Price planner</h3>
+      <p class="muted" id="plan-empty" hidden>Add ingredients to see suggested prices.</p>
+      <div class="plan-body" id="plan-body" hidden>
+        <div class="plan-group">
+          <h4>Targets</h4>
+          <div class="plan-targets">
+            <label class="field"><span>Food cost %</span><input type="number" data-plan="food" value="${plan.food}" step="any" inputmode="decimal"></label>
+            <label class="field"><span>Labor &amp; overhead %</span><input type="number" data-plan="labor" value="${plan.labor}" step="any" inputmode="decimal"></label>
+            <div class="field"><span>Net profit %</span><div class="plan-value" id="plan-profit"></div></div>
+          </div>
+          <p class="error-text" id="plan-error" hidden>Food cost and labor add up to more than 100%. Lower one of them.</p>
+          <p class="plan-note muted">Try-out only. To keep new targets, change them in Settings.</p>
+          <button class="btn link plan-reset" type="button" id="plan-reset">Reset to saved targets</button>
+        </div>
+        <div class="plan-group">
+          <h4><label for="plan-slider">Try a price: <span id="plan-price"></span></label></h4>
+          <input type="range" id="plan-slider">
+          <div class="plan-range"><span id="plan-min"></span><span id="plan-max"></span></div>
+        </div>
+        <div class="plan-group">
+          <h4>Quick prices</h4>
+          <div class="plan-presets" id="plan-presets"></div>
+        </div>
+        <div class="plan-group">
+          <h4>Where the price goes</h4>
+          <div class="plan-legend" id="plan-legend"></div>
+          <div class="plan-bar-row"><span>Target</span><div id="plan-bar-target"></div></div>
+          <div class="plan-bar-row"><span>At this price</span><div id="plan-bar-actual"></div></div>
+          <div id="plan-loss"></div>
+          <div class="table-wrap"><table class="plan-table" id="plan-table"></table></div>
+        </div>
+      </div>
+    </section>`;
+
   const summaryHTML = () => {
-    const c = calcMenu(draft);
+    const c = calcMenu(draft, plan.food, plan.labor);
     const portions = c.portions > 1 ? `<dt>Whole batch (${c.portions} portions)</dt><dd>${money(c.batchCost)}</dd>` : '';
     const neg = c.profit < 0 ? 'neg' : '';
     return `<div class="sum-head">
-        <span class="sum-label">Profit per plate</span>
+        <span class="sum-label">Est. profit per plate</span>
         <span class="big-profit ${neg}">${money(c.profit)}</span>
         ${Number.isFinite(c.profitPct) ? `<span class="pill ${c.profitPct < 0 ? 'bad' : 'ok'}">${pct(c.profitPct)} of price</span>` : ''}
       </div>
-      ${c.status === 'none' ? '' : `<div>${costMeter(c)}<div class="meter-cap"><span>Food cost ${pct(c.foodCostPct)}</span><span>Target ${d.targetCostPct}%</span></div></div>`}
+      ${c.status === 'none' ? '' : `<div>${costMeter(c)}<div class="meter-cap"><span>Food cost ${pct(c.foodCostPct)}</span><span>Target ${fmtNum(c.targetPct)}%</span></div></div>`}
       <dl>
       ${portions}
       <dt>Ingredients per plate</dt><dd>${money(c.ingredientCost)}</dd>
-      ${c.extrasLines.map(l => `<dt>${esc(l.name)}${l.ex.type === 'percent' ? ` (${fmtNum(l.ex.value)}%)` : ''}</dt><dd>${money(l.amount)}</dd>`).join('')}
+      ${c.laborCost >= 0 ? `<dt>Labor &amp; overhead (${fmtNum(c.laborPct)}%)</dt><dd>${money(c.laborCost)}</dd>` : ''}
       <dt class="total">Total cost per plate</dt><dd class="total">${money(c.totalCost)}</dd>
       <hr>
       <dt>Sell price</dt><dd>${money(num(draft.sellPrice))}</dd>
       <dt>Food cost %</dt><dd>${statusPill(c)}</dd>
-      <dt>Break-even price (covers all costs)</dt><dd>${money(c.breakEvenPrice)}</dd>
+      ${Number.isFinite(c.targetPrice) ? `<dt>Price for ${fmtNum(c.targetPct)}% food cost</dt><dd>${money(c.targetPrice)}</dd>` : ''}
+      <dt>Break-even price</dt><dd>${money(c.breakEvenPrice)}</dd>
     </dl>
-    ${c.breakEvenOk ? '' : '<p class="error-text" style="margin:8px 0 0">Extra costs are 100% or more of the sell price, so no price can cover them. Lower the % extra costs.</p>'}
     ${c.problems ? `<p class="error-text" style="margin:8px 0 0">${c.problems} ingredient line(s) are incomplete and not counted.</p>` : ''}`;
   };
 
@@ -1676,12 +1635,7 @@ function menuModal(menu, draftIn = null) {
         <tbody id="lines"></tbody>
       </table></div>
       <button class="btn small" type="button" id="add-line" style="margin-top:8px">+ Add ingredient</button>
-      ${d.extras.length ? `<div class="extras-pick">
-        <h3 class="ed-h">💡 Extra costs for this menu</h3>
-        ${d.extras.map(e => `<label class="check"><input type="checkbox" data-extra="${esc(e.id)}" ${menuUsesExtra(draft, e.id) ? 'checked' : ''}> ${esc(e.name)}
-          <span class="amt">${e.type === 'percent' ? fmtNum(e.value) + '% of price' : money(e.value) + ' per plate'}</span></label>`).join('')}
-        <p class="hint">Untick a cost this menu does not use, e.g. no gas for a cold drink.</p>
-      </div>` : ''}
+      ${planHTML}
       <section class="editor-steps">
         <h3 class="ed-h">👩‍🍳 How to make</h3>
         <ol class="steps" id="steps"></ol>
@@ -1734,8 +1688,69 @@ function menuModal(menu, draftIn = null) {
       const f = $('#menu-form', modal);
       const linesEl = $('#lines', modal);
       const drawLines = () => { linesEl.innerHTML = draft.items.map(lineRow).join(''); };
+      const planSlider = $('#plan-slider', modal);
+      // Only fills in parts of the planner, so the slider and target inputs keep working while in use.
+      const drawPlan = () => {
+        const c = calcMenu(draft, plan.food, plan.labor);
+        const ing = c.ingredientCost;
+        const ready = ing > 0;
+        $('#plan-empty', modal).hidden = ready;
+        $('#plan-body', modal).hidden = !ready;
+        if (!ready) return;
+
+        const price = num(draft.sellPrice);
+        const hasPrice = price > 0;
+        const top = 2 * Math.max(plan.startPrice, 5 * ing);
+        const step = top <= 50 ? 0.05 : top <= 500 ? 0.5 : 1;
+        const lo = +(Math.floor(ing / step) * step).toFixed(2);
+        const hi = +(Math.ceil(top / step) * step).toFixed(2);
+        if (+planSlider.max !== hi || +planSlider.min !== lo || +planSlider.step !== step) {
+          planSlider.min = lo; planSlider.max = hi; planSlider.step = step;
+          $('#plan-min', modal).textContent = money(lo);
+          $('#plan-max', modal).textContent = money(hi);
+        }
+        if (+planSlider.value !== price) planSlider.value = hasPrice ? price : lo;
+        $('#plan-price', modal).textContent = money(hasPrice ? price : NaN);
+
+        const presets = [[3.33, 30], [4, 25], [5, 20]].map(([times, foodPct]) => {
+          const value = +(ing * times).toFixed(2);
+          return `<button class="plan-preset" type="button" data-plan-price="${value}" aria-pressed="false"><strong>${times}×</strong><span class="plan-preset-price">${money(value)}</span><span class="plan-preset-pct">${foodPct}% food cost</span></button>`;
+        }).join('');
+        const presetsEl = $('#plan-presets', modal);
+        if (presetsEl.dataset.html !== presets) { presetsEl.innerHTML = presets; presetsEl.dataset.html = presets; }
+        $$('[data-plan-price]', presetsEl).forEach(b => b.setAttribute('aria-pressed', String(Math.abs(+b.dataset.planPrice - price) < 0.005)));
+
+        const food = c.targetPct;
+        const labor = c.laborPct;
+        const targetProfit = 100 - food - labor;
+        const over = targetProfit < 0;
+        $('#plan-error', modal).hidden = !over;
+        $('#plan-profit', modal).textContent = over ? '—' : fmtNum(targetProfit) + '%';
+
+        const laborAmount = c.laborCost;
+        const planProfit = c.profit;
+        const laborName = 'Labor &amp; overhead';
+        const seg = (kind, name, size, text) => size > 0 ? `<div class="plan-seg" style="flex:${size.toFixed(2)} 1 0;background:var(--chart-${kind})" title="${name}: ${text}"></div>` : '';
+        const shareOf = v => `${money(v)} (${pct(v / price)})`;
+
+        $('#plan-legend', modal).innerHTML = [['food', 'Food'], ['labor', laborName], ['profit', 'Profit']]
+          .map(([kind, name]) => `<span><i class="plan-swatch" style="background:var(--chart-${kind})"></i>${name}</span>`).join('');
+        $('#plan-bar-target', modal).innerHTML = over ? '<span class="plan-bar-none">Fix targets to see this bar</span>'
+          : `<div class="plan-bar">${seg('food', 'Food', food, fmtNum(food) + '%')}${seg('labor', laborName, labor, fmtNum(labor) + '%')}${seg('profit', 'Profit', targetProfit, fmtNum(targetProfit) + '%')}</div>`;
+        $('#plan-bar-actual', modal).innerHTML = !hasPrice ? '<span class="plan-bar-none">Choose a price to see this bar</span>'
+          : `<div class="plan-bar">${seg('food', 'Food', ing, shareOf(ing))}${seg('labor', laborName, laborAmount, shareOf(laborAmount))}${seg('profit', 'Profit', planProfit, shareOf(planProfit))}</div>`;
+        $('#plan-loss', modal).innerHTML = planProfit < 0 ? `<span class="pill bad">⚠️ Loss ${money(-planProfit)} per plate</span>` : '';
+
+        const row = (name, target, amount) => `<tr><td>${name}</td><td>${target}</td><td>${money(amount)}</td><td>${hasPrice ? pct(amount / price) : '—'}</td></tr>`;
+        $('#plan-table', modal).innerHTML = `<thead><tr><th>Part</th><th>Target</th><th>At this price</th><th>Share</th></tr></thead><tbody>
+          ${row('Food', fmtNum(food) + '%', hasPrice ? ing : NaN)}
+          ${row(laborName, fmtNum(labor) + '%', laborAmount)}
+          ${row('Profit', over ? '—' : fmtNum(targetProfit) + '%', planProfit)}</tbody>`;
+
+      };
       const drawSummary = () => {
         $('#summary', modal).innerHTML = summaryHTML();
+        drawPlan();
         $$('#lines tr[data-idx]', modal).forEach(tr => {
           $('.line-cost', tr).textContent = money(recipeLineCost(draft.items[+tr.dataset.idx]));
         });
@@ -1745,9 +1760,27 @@ function menuModal(menu, draftIn = null) {
         draft.category = f.category.value.trim();
         draft.sellPrice = f.sellPrice.value;
         draft.yield = Math.max(1, Math.round(num(f.yield.value)) || 1);
-        draft.excludedExtras = $$('[data-extra]', f).filter(cb => !cb.checked).map(cb => cb.dataset.extra);
       };
+      const setSellPrice = value => {
+        f.sellPrice.value = String(+(+value).toFixed(2));
+        readForm();
+        drawSummary();
+      };
+      f.addEventListener('click', e => {
+        const preset = e.target.closest('[data-plan-price]');
+        if (preset) { setSellPrice(preset.dataset.planPrice); return; }
+        if (e.target.id === 'plan-reset') {
+          plan.food = d.targetCostPct;
+          plan.labor = d.laborPct;
+          $('[data-plan="food"]', f).value = plan.food;
+          $('[data-plan="labor"]', f).value = plan.labor;
+          drawSummary();
+        }
+      });
       f.addEventListener('input', e => {
+        if (e.target === planSlider) { setSellPrice(e.target.value); return; }
+        if (e.target.dataset.plan) { plan[e.target.dataset.plan] = num(e.target.value); drawSummary(); return; }
+        if (e.target === f.sellPrice) plan.startPrice = num(e.target.value) || 0;
         const tr = e.target.closest('tr[data-idx]');
         if (tr) {
           const line = draft.items[+tr.dataset.idx];
@@ -1762,7 +1795,6 @@ function menuModal(menu, draftIn = null) {
         } else readForm();
         drawSummary();
       });
-      f.addEventListener('change', e => { if (e.target.dataset.extra) { readForm(); drawSummary(); } });
       f.addEventListener('submit', e => { e.preventDefault(); $('.modal-foot .primary').click(); });
       linesEl.addEventListener('click', e => {
         const sizeBtn = e.target.closest('[data-set-size]');
@@ -1907,10 +1939,8 @@ const ACTIONS = {
   'edit-menu': el => menuModal(state.data.menus.find(m => m.id === el.dataset.id)),
   'add-ingredient': () => ingredientModal(null),
   'edit-ingredient': el => ingredientModal(state.data.ingredients.find(i => i.id === el.dataset.id)),
-  'add-extra': () => extraModal(null),
   'add-measure': () => measureModal(null),
   'edit-measure': el => measureModal(state.data.measures.find(m => m.name === el.dataset.name)),
-  'edit-extra': el => extraModal(state.data.extras.find(e => e.id === el.dataset.id)),
   'import-csv': importModal,
   'csv-menu': () => openModal({
     title: 'CSV',
@@ -1929,7 +1959,7 @@ const ACTIONS = {
   'print-all-cards': () => printRecipeCards([...state.data.menus].sort(byName)),
   'download-backup': () => download(`${state.data.shopName} - backup.json`, JSON.stringify(state.data, null, 2), 'application/json'),
   'load-examples': () => confirmModal('Load example data?',
-    `Adds sample ${esc(state.data.currency)} ingredients, menus and extra costs, marked “example”. You can remove them any time in Settings → Clear example data.`,
+    `Adds sample ${esc(state.data.currency)} ingredients and menus, marked “example”. You can remove them any time in Settings → Clear example data.`,
     'Load examples', () => { mutate(loadExampleData); toast('Example data loaded', 'ok'); }),
   'clear-examples': () => confirmModal('Clear example data?',
     'Removes all items marked “example”. Example ingredients still used by your own menus are kept.',
@@ -1986,7 +2016,10 @@ function bind() {
       const v = Object.fromEntries(new FormData(settings));
       const target = num(v.targetCostPct);
       if (!(target > 0 && target <= 100)) { toast('Target must be between 1 and 100.', 'bad'); return; }
-      mutate(d => { d.shopName = v.shopName.trim() || d.shopName; d.currency = v.currency; d.targetCostPct = target; });
+      const labor = num(v.laborPct);
+      if (!(labor >= 0 && labor <= 100)) { toast('Labor target must be between 0 and 100.', 'bad'); return; }
+      if (target + labor > 100) { toast('Food cost and labor add up to more than 100%. Lower one of them.', 'bad'); return; }
+      mutate(d => { d.shopName = v.shopName.trim() || d.shopName; d.currency = v.currency; d.targetCostPct = target; d.laborPct = labor; });
       toast('Settings saved', 'ok');
     };
   }
